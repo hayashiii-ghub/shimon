@@ -1,0 +1,34 @@
+{
+  "name": "@hayashiii/shimon",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Deterministic UI fingerprints for agent-driven design work.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hayashiii-ghub/shimon.git"
+  },
+  "type": "module",
+  "bin": {
+    "shimon": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "SKILL.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "bun build src/bin.ts --target=node --format=esm --outfile=dist/cli.js --banner=\"#!/usr/bin/env node\" --external playwright",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "playwright": "^1.59.1"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.13",
+    "typescript": "^5.9.3"
+  }
+}
