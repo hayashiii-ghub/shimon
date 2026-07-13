@@ -72,6 +72,7 @@ Only run shimon in repositories you trust.
 
 ```sh
 bun install
+npx playwright install chromium
 bun test
 bun run typecheck
 bun run build

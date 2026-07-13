@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -47,8 +47,6 @@ describe("parseCliArgs", () => {
   test("runs the packaged CLI through a bin symlink", async () => {
     const root = await mkdtemp(join(tmpdir(), "shimon-bin-"));
     roots.push(root);
-    const build = spawnSync("bun", ["run", "build"], { cwd: resolve(import.meta.dir, "..") });
-    expect(build.status).toBe(0);
     const link = join(root, "shimon");
     await symlink(resolve(import.meta.dir, "../dist/cli.js"), link);
 
@@ -56,6 +54,29 @@ describe("parseCliArgs", () => {
 
     expect(result.status).toBe(0);
     expect(result.stdout).toBe("0.0.1\n");
+  });
+
+  test("keeps the tracked CLI bundle synchronized with its source", async () => {
+    const root = await mkdtemp(join(tmpdir(), "shimon-build-"));
+    roots.push(root);
+    const repository = resolve(import.meta.dir, "..");
+    const output = join(root, "cli.js");
+    const build = spawnSync(
+      "bun",
+      [
+        "build",
+        "src/bin.ts",
+        "--target=node",
+        "--format=esm",
+        `--outfile=${output}`,
+        "--banner=#!/usr/bin/env node",
+        "--external=playwright",
+      ],
+      { cwd: repository },
+    );
+    expect(build.status).toBe(0);
+
+    expect(await readFile(output, "utf8")).toBe(await readFile(join(repository, "dist/cli.js"), "utf8"));
   });
 
   test("includes the CLI bundle when packed from a GitHub-style source archive", async () => {
