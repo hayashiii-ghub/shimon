@@ -57,4 +57,32 @@ describe("parseCliArgs", () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toBe("0.0.1\n");
   });
+
+  test("includes the CLI bundle when packed from a GitHub-style source archive", async () => {
+    const root = await mkdtemp(join(tmpdir(), "shimon-archive-"));
+    roots.push(root);
+    const repository = resolve(import.meta.dir, "..");
+    const tracked = spawnSync("git", ["ls-files", "--error-unmatch", "dist/cli.js"], {
+      cwd: repository,
+    });
+    expect(tracked.status).toBe(0);
+    const tree = spawnSync("git", ["write-tree"], { cwd: repository, encoding: "utf8" });
+    expect(tree.status).toBe(0);
+    const archive = spawnSync("git", ["archive", "--format=tar", tree.stdout.trim()], {
+      cwd: repository,
+    });
+    expect(archive.status).toBe(0);
+    const extract = spawnSync("tar", ["-xf", "-"], { cwd: root, input: archive.stdout });
+    expect(extract.status).toBe(0);
+
+    const packed = spawnSync(
+      "npm",
+      ["pack", "--dry-run", "--json", "--cache", join(root, "npm-cache")],
+      { cwd: root, encoding: "utf8" },
+    );
+    expect(packed.status).toBe(0);
+    const [manifest] = JSON.parse(packed.stdout) as [{ files: Array<{ path: string }> }];
+
+    expect(manifest.files.map((file) => file.path)).toContain("dist/cli.js");
+  });
 });
