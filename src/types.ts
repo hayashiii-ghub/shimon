@@ -9,6 +9,7 @@ export interface Viewport {
 
 export interface ShimonCase {
   name: string;
+  viewport?: Viewport;
   prepare?: (page: Page) => Promise<void> | void;
 }
 
@@ -21,6 +22,20 @@ export interface ShimonConfig {
   probe: (page: Page) => Promise<JsonValue> | JsonValue;
   stabilize?: (page: Page) => Promise<void> | void;
   freezeAnimations: boolean;
+  screenshot?: {
+    mask: string[];
+  };
+  webServer?: {
+    command: string;
+    url: string;
+    reuseExisting: boolean;
+    timeoutMs: number;
+  };
+  timeouts?: {
+    runMs: number;
+    caseMs: number;
+    navigationMs: number;
+  };
 }
 
 export interface LoadedConfig {
@@ -29,7 +44,7 @@ export interface LoadedConfig {
 }
 
 export interface FingerprintArtifact {
-  schemaVersion: 1;
+  schemaVersion: 2;
   toolVersion: string;
   target: {
     url: string;
@@ -44,6 +59,7 @@ export interface FingerprintArtifact {
   };
   cases: Array<{
     name: string;
+    viewport: Viewport;
     probe: JsonValue;
   }>;
 }

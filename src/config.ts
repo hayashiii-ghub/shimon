@@ -7,6 +7,7 @@ import type { LoadedConfig, ShimonCase, ShimonConfig, Viewport } from "./types.t
 
 const DEFAULT_CONFIG = "shimon.config.mjs";
 const DEFAULT_VIEWPORT: Viewport = { width: 1200, height: 900 };
+const DEFAULT_TIMEOUTS = { runMs: 120_000, caseMs: 20_000, navigationMs: 10_000 };
 
 function invalid(message: string): never {
   throw new ShimonError("config_invalid", message, "Check shimon.config.mjs.");
@@ -36,13 +37,77 @@ function validateCases(value: unknown): ShimonCase[] {
     if (typeof item.name !== "string" || item.name.trim() === "") {
       invalid(`cases[${index}].name must be a non-empty string.`);
     }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(item.name)) {
+      invalid(`cases[${index}].name must use 1-64 letters, numbers, dots, dashes, or underscores.`);
+    }
     if (names.has(item.name)) invalid(`Duplicate case name: ${item.name}`);
     names.add(item.name);
     if (item.prepare !== undefined && typeof item.prepare !== "function") {
       invalid(`cases[${index}].prepare must be a function.`);
     }
-    return { name: item.name, prepare: item.prepare };
+    return {
+      name: item.name,
+      viewport: item.viewport === undefined ? undefined : validateViewport(item.viewport),
+      prepare: item.prepare,
+    };
   });
+}
+
+function validateScreenshot(value: unknown): ShimonConfig["screenshot"] {
+  if (value === undefined) return { mask: [] };
+  if (value === null || typeof value !== "object") invalid("screenshot must be an object.");
+  const mask = (value as Record<string, unknown>).mask;
+  if (mask === undefined) return { mask: [] };
+  if (!Array.isArray(mask) || mask.some((selector) => typeof selector !== "string" || selector.trim() === "")) {
+    invalid("screenshot.mask must be an array of non-empty selectors.");
+  }
+  return { mask: mask as string[] };
+}
+
+function positiveInteger(value: unknown, fallback: number, path: string): number {
+  if (value === undefined) return fallback;
+  if (!Number.isInteger(value) || (value as number) <= 0) invalid(`${path} must be a positive integer.`);
+  return value as number;
+}
+
+function validateTimeouts(value: unknown): NonNullable<ShimonConfig["timeouts"]> {
+  if (value === undefined) return DEFAULT_TIMEOUTS;
+  if (value === null || typeof value !== "object") invalid("timeouts must be an object.");
+  const timeouts = value as Record<string, unknown>;
+  return {
+    runMs: positiveInteger(timeouts.runMs, DEFAULT_TIMEOUTS.runMs, "timeouts.runMs"),
+    caseMs: positiveInteger(timeouts.caseMs, DEFAULT_TIMEOUTS.caseMs, "timeouts.caseMs"),
+    navigationMs: positiveInteger(
+      timeouts.navigationMs,
+      DEFAULT_TIMEOUTS.navigationMs,
+      "timeouts.navigationMs",
+    ),
+  };
+}
+
+function validateWebServer(value: unknown): ShimonConfig["webServer"] {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== "object") invalid("webServer must be an object.");
+  const server = value as Record<string, unknown>;
+  if (typeof server.command !== "string" || server.command.trim() === "") {
+    invalid("webServer.command must be a non-empty string.");
+  }
+  if (typeof server.url !== "string") invalid("webServer.url must be a string.");
+  try {
+    const url = new URL(server.url as string);
+    if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("unsupported protocol");
+  } catch {
+    invalid("webServer.url must be an absolute HTTP(S) URL.");
+  }
+  if (server.reuseExisting !== undefined && typeof server.reuseExisting !== "boolean") {
+    invalid("webServer.reuseExisting must be a boolean.");
+  }
+  return {
+    command: server.command as string,
+    url: server.url as string,
+    reuseExisting: server.reuseExisting !== false,
+    timeoutMs: positiveInteger(server.timeoutMs, 30_000, "webServer.timeoutMs"),
+  };
 }
 
 function validateConfig(value: unknown): ShimonConfig {
@@ -74,6 +139,9 @@ function validateConfig(value: unknown): ShimonConfig {
     probe: candidate.probe as ShimonConfig["probe"],
     stabilize: candidate.stabilize as ShimonConfig["stabilize"],
     freezeAnimations: candidate.freezeAnimations !== false,
+    screenshot: validateScreenshot(candidate.screenshot),
+    webServer: validateWebServer(candidate.webServer),
+    timeouts: validateTimeouts(candidate.timeouts),
   };
 }
 

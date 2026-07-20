@@ -44,4 +44,33 @@ describe("loadConfig", () => {
 
     await expect(loadConfig({ cwd: root })).rejects.toThrow("Duplicate case name");
   });
+
+  test("loads managed server and timeout budgets", async () => {
+    const root = await mkdtemp(join(tmpdir(), "shimon-config-"));
+    roots.push(root);
+    await writeFile(
+      join(root, "shimon.config.mjs"),
+      `export default {
+        target: { url: "http://127.0.0.1:4322/" },
+        webServer: { command: "bun run dev", url: "http://127.0.0.1:4322/" },
+        timeouts: { runMs: 90000, caseMs: 15000, navigationMs: 5000 },
+        cases: [{ name: "start" }],
+        probe: async () => ({}),
+      };`,
+    );
+
+    const loaded = await loadConfig({ cwd: root });
+
+    expect(loaded.config.webServer).toEqual({
+      command: "bun run dev",
+      url: "http://127.0.0.1:4322/",
+      reuseExisting: true,
+      timeoutMs: 30_000,
+    });
+    expect(loaded.config.timeouts).toEqual({
+      runMs: 90_000,
+      caseMs: 15_000,
+      navigationMs: 5_000,
+    });
+  });
 });

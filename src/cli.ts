@@ -3,17 +3,20 @@ import { resolve } from "node:path";
 import type { JsonValue } from "./canonicalize.ts";
 import { loadConfig } from "./config.ts";
 import { diffJson } from "./diff.ts";
+import { sanitizeDiagnosticText } from "./diagnostics.ts";
 import { operationalError, ShimonError } from "./errors.ts";
 import { captureFingerprint } from "./runner.ts";
 import { readArtifact, writeArtifact } from "./store.ts";
 import { publicTargetUrl } from "./url.ts";
 import { TOOL_VERSION } from "./version.ts";
+import { verifyProject } from "./verify.ts";
 
-type Command = "capture" | "diff" | "help" | "selftest" | "version";
+type Command = "capture" | "diff" | "help" | "selftest" | "verify" | "version";
 
 export interface CliArgs {
   command: Command;
   labels: string[];
+  caseNames: string[];
   json: boolean;
   configPath?: string;
 }
@@ -22,6 +25,7 @@ const HELP = `shimon ${TOOL_VERSION}
 
 Usage:
   shimon selftest [--config <path>] [--json]
+  shimon verify [--case <name>] [--config <path>] [--json]
   shimon capture <label> [--config <path>] [--json]
   shimon diff <before> <after> [--json]
 `;
@@ -34,11 +38,21 @@ export function parseCliArgs(argv: string[]): CliArgs {
   const positionals: string[] = [];
   let json = false;
   let configPath: string | undefined;
+  const caseNames: string[] = [];
 
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--json") {
       json = true;
+    } else if (argument === "--case") {
+      const caseName = argv[index + 1];
+      if (!caseName || caseName.startsWith("--")) usage("--case requires a name.");
+      caseNames.push(caseName);
+      index += 1;
+    } else if (argument.startsWith("--case=")) {
+      const caseName = argument.slice("--case=".length);
+      if (!caseName) usage("--case requires a name.");
+      caseNames.push(caseName);
     } else if (argument === "--config") {
       configPath = argv[index + 1];
       if (!configPath || configPath.startsWith("--")) usage("--config requires a path.");
@@ -58,7 +72,7 @@ export function parseCliArgs(argv: string[]): CliArgs {
   }
 
   const command = (positionals.shift() ?? "help") as Command;
-  if (!["capture", "diff", "help", "selftest", "version"].includes(command)) {
+  if (!["capture", "diff", "help", "selftest", "verify", "version"].includes(command)) {
     usage(`Unknown command: ${command}`);
   }
 
@@ -68,8 +82,9 @@ export function parseCliArgs(argv: string[]): CliArgs {
     if (command === "diff") usage("diff requires two labels.");
     usage(`${command} does not accept labels.`);
   }
+  if (caseNames.length > 0 && command !== "verify") usage("--case is only valid with verify.");
 
-  return { command, labels: positionals, json, configPath };
+  return { command, labels: positionals, caseNames, json, configPath };
 }
 
 function emit(value: unknown, json: boolean, human: string): void {
@@ -108,6 +123,12 @@ async function run(args: CliArgs, cwd: string): Promise<number> {
   }
 
   const loaded = await loadConfig({ cwd, configPath: args.configPath });
+  if (args.command === "verify") {
+    progress(`verifying ${publicTargetUrl(loaded.config.target.url)}`);
+    const result = await verifyProject(loaded.config, { root, caseNames: args.caseNames, cwd });
+    emit(result, args.json, result.pass ? "verification passed" : "verification failed");
+    return result.pass ? 0 : 1;
+  }
   if (args.command === "capture") {
     const label = args.labels[0];
     progress(`capturing ${label} from ${publicTargetUrl(loaded.config.target.url)}`);
@@ -142,11 +163,19 @@ export async function main(argv = process.argv.slice(2), cwd = process.cwd()): P
     return await run(args, cwd);
   } catch (error) {
     const failure = operationalError(error);
+    const message = sanitizeDiagnosticText(failure.message);
+    const hint = failure.hint ? sanitizeDiagnosticText(failure.hint) : undefined;
     const payload = {
-      ok: false,
-      error: { code: failure.code, message: failure.message, ...(failure.hint ? { hint: failure.hint } : {}) },
+      schemaVersion: 1,
+      success: false,
+      error: {
+        code: failure.code,
+        message,
+        ...(hint ? { hint } : {}),
+      },
     };
-    process.stderr.write(json ? `${JSON.stringify(payload)}\n` : `shimon: ${failure.message}\n`);
+    if (json) process.stdout.write(`${JSON.stringify(payload)}\n`);
+    else process.stderr.write(`shimon: ${message}\n`);
     return 2;
   }
 }
