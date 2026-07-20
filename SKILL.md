@@ -1,33 +1,37 @@
 ---
 name: shimon
-description: Capture and compare deterministic, project-defined UI fingerprints.
+description: Run project-defined UI quality checks and return agent-readable evidence.
 ---
 
 # shimon
 
-Use shimon when a repository includes `shimon.config.mjs` and a design or UI
-change should preserve defined visual invariants.
+Use shimon when a trusted repository includes `shimon.config.mjs` and a UI,
+layout, or interaction change needs visual verification.
 
-## Workflow
+## Development loop
 
-1. Start the target application at the URL declared by its config.
-2. Run `shimon selftest --json` before trusting any comparison.
-3. Run `shimon capture baseline --json` before the change.
-4. Implement the change.
-5. Run `shimon capture current --json`.
-6. Run `shimon diff baseline current --json` and inspect every changed path.
+1. Run the repository's `ui:verify` script when present; otherwise run
+   `shimon verify --json`.
+2. Treat exit code `1` as an observed UI or case failure and exit code `2` as a
+   broken invocation, config, server, or browser run.
+3. Read every screenshot path returned by the JSON and inspect the image.
+4. Check overflow, console errors, failed requests, and a11y before reporting
+   the UI step complete.
+5. After a fix, run the failed case's returned `reproduce` command. Run the full
+   verify command once focused cases pass.
 
-Treat exit code `1` as an observed UI mismatch, not an operational failure.
-Treat exit code `2` as a broken invocation, config, target, or browser run.
+The configured web server is started and stopped automatically when necessary.
+Do not start a second server when `run.webServer.reused` is true.
 
-Do not infer design quality from a passing fingerprint. It only proves that the
-project-defined observations are equal. Do not weaken or delete probes merely
-to make a change pass; update the config only when the intended invariant has
-actually changed.
+## Fingerprint comparison
 
-Never probe credentials, personal data, tokens, or authenticated content that
-must not be persisted. Artifacts are stored on disk, and `diff --json` emits
-changed values to stdout where CI or agent logs may retain them.
+Use `selftest`, `capture`, and `diff` when the task requires comparison with a
+stored project-defined fingerprint. Do not infer design quality from an equal
+fingerprint; it only proves that configured observations are equal.
+
+Never weaken probes or health checks merely to make a change pass. Never probe
+credentials, personal data, tokens, or authenticated content that must not be
+persisted. Confirm that sensitive content is covered by `screenshot.mask`.
 
 `shimon.config.mjs` is trusted executable code. Do not run it from an untrusted
 repository.

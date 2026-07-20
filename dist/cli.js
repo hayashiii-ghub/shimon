@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // src/cli.ts
-import { resolve as resolve2 } from "node:path";
+import { resolve as resolve3 } from "node:path";
 
 // src/config.ts
 import { access } from "node:fs/promises";
@@ -31,6 +31,7 @@ function operationalError(error) {
 // src/config.ts
 var DEFAULT_CONFIG = "shimon.config.mjs";
 var DEFAULT_VIEWPORT = { width: 1200, height: 900 };
+var DEFAULT_TIMEOUTS = { runMs: 120000, caseMs: 20000, navigationMs: 1e4 };
 function invalid(message) {
   throw new ShimonError("config_invalid", message, "Check shimon.config.mjs.");
 }
@@ -59,14 +60,81 @@ function validateCases(value) {
     if (typeof item.name !== "string" || item.name.trim() === "") {
       invalid(`cases[${index}].name must be a non-empty string.`);
     }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(item.name)) {
+      invalid(`cases[${index}].name must use 1-64 letters, numbers, dots, dashes, or underscores.`);
+    }
     if (names.has(item.name))
       invalid(`Duplicate case name: ${item.name}`);
     names.add(item.name);
     if (item.prepare !== undefined && typeof item.prepare !== "function") {
       invalid(`cases[${index}].prepare must be a function.`);
     }
-    return { name: item.name, prepare: item.prepare };
+    return {
+      name: item.name,
+      viewport: item.viewport === undefined ? undefined : validateViewport(item.viewport),
+      prepare: item.prepare
+    };
   });
+}
+function validateScreenshot(value) {
+  if (value === undefined)
+    return { mask: [] };
+  if (value === null || typeof value !== "object")
+    invalid("screenshot must be an object.");
+  const mask = value.mask;
+  if (mask === undefined)
+    return { mask: [] };
+  if (!Array.isArray(mask) || mask.some((selector) => typeof selector !== "string" || selector.trim() === "")) {
+    invalid("screenshot.mask must be an array of non-empty selectors.");
+  }
+  return { mask };
+}
+function positiveInteger(value, fallback, path) {
+  if (value === undefined)
+    return fallback;
+  if (!Number.isInteger(value) || value <= 0)
+    invalid(`${path} must be a positive integer.`);
+  return value;
+}
+function validateTimeouts(value) {
+  if (value === undefined)
+    return DEFAULT_TIMEOUTS;
+  if (value === null || typeof value !== "object")
+    invalid("timeouts must be an object.");
+  const timeouts = value;
+  return {
+    runMs: positiveInteger(timeouts.runMs, DEFAULT_TIMEOUTS.runMs, "timeouts.runMs"),
+    caseMs: positiveInteger(timeouts.caseMs, DEFAULT_TIMEOUTS.caseMs, "timeouts.caseMs"),
+    navigationMs: positiveInteger(timeouts.navigationMs, DEFAULT_TIMEOUTS.navigationMs, "timeouts.navigationMs")
+  };
+}
+function validateWebServer(value) {
+  if (value === undefined)
+    return;
+  if (value === null || typeof value !== "object")
+    invalid("webServer must be an object.");
+  const server = value;
+  if (typeof server.command !== "string" || server.command.trim() === "") {
+    invalid("webServer.command must be a non-empty string.");
+  }
+  if (typeof server.url !== "string")
+    invalid("webServer.url must be a string.");
+  try {
+    const url = new URL(server.url);
+    if (url.protocol !== "http:" && url.protocol !== "https:")
+      throw new Error("unsupported protocol");
+  } catch {
+    invalid("webServer.url must be an absolute HTTP(S) URL.");
+  }
+  if (server.reuseExisting !== undefined && typeof server.reuseExisting !== "boolean") {
+    invalid("webServer.reuseExisting must be a boolean.");
+  }
+  return {
+    command: server.command,
+    url: server.url,
+    reuseExisting: server.reuseExisting !== false,
+    timeoutMs: positiveInteger(server.timeoutMs, 30000, "webServer.timeoutMs")
+  };
 }
 function validateConfig(value) {
   if (value === null || typeof value !== "object")
@@ -99,7 +167,10 @@ function validateConfig(value) {
     cases: validateCases(candidate.cases),
     probe: candidate.probe,
     stabilize: candidate.stabilize,
-    freezeAnimations: candidate.freezeAnimations !== false
+    freezeAnimations: candidate.freezeAnimations !== false,
+    screenshot: validateScreenshot(candidate.screenshot),
+    webServer: validateWebServer(candidate.webServer),
+    timeouts: validateTimeouts(candidate.timeouts)
   };
 }
 async function loadConfig(options) {
@@ -156,9 +227,6 @@ function diffJson(before, after) {
   return changes;
 }
 
-// src/runner.ts
-import { chromium } from "playwright";
-
 // src/url.ts
 function publicTargetUrl(rawUrl) {
   const url = new URL(rawUrl);
@@ -172,10 +240,30 @@ function publicTargetUrl(rawUrl) {
   return url.toString();
 }
 
-// src/version.ts
-var TOOL_VERSION = "0.0.1";
+// src/diagnostics.ts
+var MAX_DIAGNOSTIC_LENGTH = 500;
+var HTTP_URL = /\bhttps?:\/\/[^\s<>"']+/giu;
+var SECRET_FIELD = /\b(authorization|password|passwd|secret|api[_-]?key|(?:access[_-]?|refresh[_-]?)?token|cookie|set-cookie)\s*[:=]\s*(?:bearer\s+)?[^\s,;]+/giu;
+function redactUrl(match) {
+  const trailing = match.match(/[),.;!?]+$/u)?.[0] ?? "";
+  const candidate = trailing ? match.slice(0, -trailing.length) : match;
+  try {
+    return `${publicTargetUrl(candidate)}${trailing}`;
+  } catch {
+    return `[redacted-url]${trailing}`;
+  }
+}
+function sanitizeDiagnosticText(value) {
+  const sanitized = value.replace(HTTP_URL, redactUrl).replace(SECRET_FIELD, (_match, field) => `${field}=[redacted]`);
+  if (sanitized.length <= MAX_DIAGNOSTIC_LENGTH)
+    return sanitized;
+  return `${sanitized.slice(0, MAX_DIAGNOSTIC_LENGTH - 1)}…`;
+}
 
 // src/runner.ts
+import { chromium } from "playwright";
+
+// src/case-runner.ts
 var FREEZE_STYLES = `
   *, *::before, *::after {
     animation: none !important;
@@ -205,46 +293,68 @@ async function settle(page) {
     requestAnimationFrame(() => requestAnimationFrame(() => resolve2()));
   }));
 }
+async function runConfiguredCase(page, config, testCase, execute = async (promise) => promise) {
+  if (config.freezeAnimations) {
+    await execute(page.addStyleTag({ content: FREEZE_STYLES }).then(() => {
+      return;
+    }));
+  }
+  await execute(page.evaluate(() => document.fonts.ready));
+  if (config.stabilize) {
+    await execute(Promise.resolve().then(() => config.stabilize(page)));
+  }
+  await execute(settle(page));
+  if (testCase.prepare) {
+    await execute(Promise.resolve().then(() => testCase.prepare(page)));
+  }
+  await execute(settle(page));
+  return asJsonValue(await execute(Promise.resolve().then(() => config.probe(page))), `cases.${testCase.name}.probe`);
+}
+
+// src/version.ts
+var TOOL_VERSION = "0.0.1";
+
+// src/runner.ts
 async function captureFingerprint(config) {
   const browser = await chromium.launch({ headless: true });
   try {
-    const context = await browser.newContext({ viewport: config.target.viewport });
-    const page = await context.newPage();
     const recordedUrl = publicTargetUrl(config.target.url);
-    let response;
-    try {
-      response = await page.goto(config.target.url, { waitUntil: "load" });
-    } catch (error) {
-      throw new ShimonError("target_navigation_failed", `Could not load target: ${recordedUrl}`, undefined, {
-        cause: error
-      });
-    }
-    if (response && !response.ok()) {
-      throw new ShimonError("target_http_error", `Target returned HTTP ${response.status()}: ${recordedUrl}`);
-    }
-    await page.waitForLoadState("networkidle", { timeout: 1000 }).catch(() => {
-      return;
-    });
-    if (config.freezeAnimations) {
-      await page.addStyleTag({ content: FREEZE_STYLES });
-    }
-    await page.evaluate(() => document.fonts.ready);
-    await config.stabilize?.(page);
-    await settle(page);
-    const runtime = await page.evaluate(() => ({
-      deviceScaleFactor: window.devicePixelRatio,
-      locale: navigator.language,
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
-    }));
     const cases = [];
+    let runtime;
     for (const testCase of config.cases) {
-      await testCase.prepare?.(page);
-      await settle(page);
-      const probe = asJsonValue(await config.probe(page), `cases.${testCase.name}.probe`);
-      cases.push({ name: testCase.name, probe });
+      const viewport = testCase.viewport ?? config.target.viewport;
+      const context = await browser.newContext({ viewport });
+      try {
+        const page = await context.newPage();
+        let response;
+        try {
+          response = await page.goto(config.target.url, { waitUntil: "load" });
+        } catch (error) {
+          throw new ShimonError("target_navigation_failed", `Could not load target: ${recordedUrl}`, undefined, {
+            cause: error
+          });
+        }
+        if (response && !response.ok()) {
+          throw new ShimonError("target_http_error", `Target returned HTTP ${response.status()}: ${recordedUrl}`);
+        }
+        await page.waitForLoadState("networkidle", { timeout: 1000 }).catch(() => {
+          return;
+        });
+        runtime ??= await page.evaluate(() => ({
+          deviceScaleFactor: window.devicePixelRatio,
+          locale: navigator.language,
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+        }));
+        const probe = await runConfiguredCase(page, config, testCase);
+        cases.push({ name: testCase.name, viewport, probe });
+      } finally {
+        await context.close();
+      }
     }
+    if (!runtime)
+      throw new ShimonError("config_invalid", "At least one case is required.");
     return {
-      schemaVersion: 1,
+      schemaVersion: 2,
       toolVersion: TOOL_VERSION,
       target: { url: recordedUrl },
       environment: {
@@ -284,6 +394,27 @@ function canonicalStringify(value) {
 
 // src/store.ts
 var LABEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+function isRecord2(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+function isViewport(value) {
+  if (!isRecord2(value))
+    return false;
+  return Number.isInteger(value.width) && value.width > 0 && Number.isInteger(value.height) && value.height > 0;
+}
+function isFingerprintArtifact(value) {
+  if (!isRecord2(value.target) || typeof value.target.url !== "string")
+    return false;
+  if (!isRecord2(value.environment))
+    return false;
+  const environment = value.environment;
+  if (typeof environment.browser !== "string" || typeof environment.browserVersion !== "string" || !isViewport(environment.viewport) || typeof environment.deviceScaleFactor !== "number" || !Number.isFinite(environment.deviceScaleFactor) || typeof environment.locale !== "string" || typeof environment.timezone !== "string") {
+    return false;
+  }
+  if (!Array.isArray(value.cases))
+    return false;
+  return value.cases.every((testCase) => isRecord2(testCase) && typeof testCase.name === "string" && isViewport(testCase.viewport) && Object.hasOwn(testCase, "probe"));
+}
 function artifactPath(root, label) {
   if (!LABEL_PATTERN.test(label) || label === "." || label === "..") {
     throw new Error(`Invalid label ${JSON.stringify(label)}; use 1-128 letters, numbers, dots, dashes, or underscores.`);
@@ -304,7 +435,405 @@ async function writeArtifact(root, label, artifact) {
 }
 async function readArtifact(root, label) {
   const source = artifactPath(root, label);
-  return JSON.parse(await readFile(source, "utf8"));
+  let artifact;
+  try {
+    artifact = JSON.parse(await readFile(source, "utf8"));
+  } catch (error) {
+    throw new ShimonError("artifact_invalid", `Could not read artifact: ${source}`, undefined, {
+      cause: error
+    });
+  }
+  if (artifact === null || typeof artifact !== "object" || Array.isArray(artifact)) {
+    throw new ShimonError("artifact_invalid", `Artifact must be a JSON object: ${source}`);
+  }
+  const value = artifact;
+  if (value.schemaVersion !== 2) {
+    throw new ShimonError("artifact_incompatible", `Artifact schema ${String(value.schemaVersion)} is not supported: ${source}`, "Capture a fresh artifact with this shimon version.");
+  }
+  if (typeof value.toolVersion !== "string" || !isFingerprintArtifact(value)) {
+    throw new ShimonError("artifact_invalid", `Artifact is missing required fields: ${source}`);
+  }
+  return artifact;
+}
+
+// src/verify.ts
+import { createHash, randomUUID as randomUUID3 } from "node:crypto";
+import { mkdir as mkdir2 } from "node:fs/promises";
+import { join as join3, resolve as resolve2 } from "node:path";
+import { chromium as chromium2 } from "playwright";
+
+// src/checks.ts
+import { createRequire } from "node:module";
+var MAX_ITEMS = 20;
+var require2 = createRequire(import.meta.url);
+function collectPageFailures(page) {
+  const messages = [];
+  const requests = [];
+  const pushRequest = (request, response) => {
+    if (requests.length >= MAX_ITEMS)
+      return;
+    requests.push({
+      url: publicTargetUrl(request.url()),
+      method: request.method(),
+      resourceType: request.resourceType(),
+      status: response?.status() ?? null,
+      error: response ? null : sanitizeDiagnosticText(request.failure()?.errorText ?? "failed")
+    });
+  };
+  page.on("console", (message) => {
+    if (message.type() === "error" && messages.length < MAX_ITEMS) {
+      messages.push(sanitizeDiagnosticText(message.text()));
+    }
+  });
+  page.on("pageerror", (error) => {
+    if (messages.length < MAX_ITEMS)
+      messages.push(sanitizeDiagnosticText(error.message));
+  });
+  page.on("requestfailed", (request) => pushRequest(request));
+  page.on("response", (response) => {
+    if (response.status() >= 400)
+      pushRequest(response.request(), response);
+  });
+  return {
+    snapshot: () => ({
+      consoleErrors: { pass: messages.length === 0, messages: [...messages] },
+      failedRequests: { pass: requests.length === 0, requests: [...requests] }
+    })
+  };
+}
+async function runPageChecks(page, failures) {
+  const overflow = await page.evaluate((limit) => {
+    const documentElement = document.documentElement;
+    const amount = Math.max(0, documentElement.scrollWidth - documentElement.clientWidth);
+    const offenders = [];
+    if (amount > 0) {
+      for (const node of document.querySelectorAll("body *")) {
+        const rect = node.getBoundingClientRect();
+        if (rect.width <= 0 || rect.right <= documentElement.clientWidth + 1)
+          continue;
+        const element = node;
+        const id = element.id ? `#${element.id}` : "";
+        const classes = element.classList.length ? `.${[...element.classList].slice(0, 3).join(".")}` : "";
+        offenders.push({
+          selector: `${element.tagName.toLowerCase()}${id}${classes}`,
+          box: {
+            x: Math.round(rect.x),
+            y: Math.round(rect.y),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+            right: Math.round(rect.right)
+          },
+          overflowX: Math.max(0, Math.round(rect.right - documentElement.clientWidth))
+        });
+        if (offenders.length >= limit)
+          break;
+      }
+    }
+    return { amount, offenders };
+  }, MAX_ITEMS);
+  await page.addScriptTag({ path: require2.resolve("axe-core/axe.min.js") });
+  const axeResult = await page.evaluate(async () => {
+    const axe = window.axe;
+    return axe.run();
+  });
+  const violations = axeResult.violations.slice(0, MAX_ITEMS).map((violation) => ({
+    id: violation.id,
+    impact: violation.impact,
+    description: violation.description,
+    helpUrl: violation.helpUrl,
+    nodes: violation.nodes.length,
+    targets: violation.nodes.slice(0, 5).map((node) => node.target.map(String).join(" "))
+  }));
+  return {
+    overflow: { pass: overflow.amount === 0, ...overflow },
+    ...failures.snapshot(),
+    a11y: { pass: violations.length === 0, violations }
+  };
+}
+
+// src/evidence.ts
+import { randomUUID as randomUUID2 } from "node:crypto";
+import { readdir, rename as rename2, rm as rm2, stat, writeFile as writeFile2 } from "node:fs/promises";
+import { join as join2 } from "node:path";
+async function writeJsonAtomic(path, value) {
+  const temporary = `${path}.${randomUUID2()}.tmp`;
+  try {
+    await writeFile2(temporary, `${JSON.stringify(value)}
+`, { encoding: "utf8", flag: "wx" });
+    await rename2(temporary, path);
+  } finally {
+    await rm2(temporary, { force: true });
+  }
+}
+async function pruneRunDirectories(root, keep) {
+  const runs = join2(root, "runs");
+  const entries = await readdir(runs, { withFileTypes: true }).catch(() => []);
+  const directories = await Promise.all(entries.filter((entry) => entry.isDirectory()).map(async (entry) => {
+    const path = join2(runs, entry.name);
+    return { path, mtimeMs: (await stat(path)).mtimeMs };
+  }));
+  directories.sort((left, right) => left.mtimeMs - right.mtimeMs || left.path.localeCompare(right.path));
+  const removed = directories.slice(0, Math.max(0, directories.length - keep)).map((entry) => entry.path);
+  await Promise.all(removed.map((path) => rm2(path, { recursive: true, force: true })));
+  return removed;
+}
+
+// src/web-server.ts
+import { spawn } from "node:child_process";
+async function reachable(url) {
+  try {
+    await fetch(url, { signal: AbortSignal.timeout(500) });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function delay(milliseconds) {
+  return new Promise((resolve2) => setTimeout(resolve2, milliseconds));
+}
+function waitForExit(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null)
+    return Promise.resolve(true);
+  return new Promise((resolve2) => {
+    const timer = setTimeout(() => resolve2(false), timeoutMs);
+    child.once("exit", () => {
+      clearTimeout(timer);
+      resolve2(true);
+    });
+  });
+}
+async function terminate(child) {
+  if (child.exitCode !== null || child.signalCode !== null)
+    return;
+  try {
+    if (process.platform !== "win32" && child.pid)
+      process.kill(-child.pid, "SIGTERM");
+    else
+      child.kill("SIGTERM");
+  } catch {
+    child.kill("SIGTERM");
+  }
+  if (await waitForExit(child, 1000))
+    return;
+  try {
+    if (process.platform !== "win32" && child.pid)
+      process.kill(-child.pid, "SIGKILL");
+    else
+      child.kill("SIGKILL");
+  } catch {
+    child.kill("SIGKILL");
+  }
+  await waitForExit(child, 1000);
+}
+async function startManagedWebServer(options) {
+  if (await reachable(options.url)) {
+    if (!options.reuseExisting) {
+      throw new ShimonError("web_server_already_running", `A server is already reachable at ${publicTargetUrl(options.url)}`);
+    }
+    return { reused: true, close: async () => {
+      return;
+    } };
+  }
+  const child = spawn(options.command, {
+    cwd: options.cwd,
+    shell: true,
+    detached: process.platform !== "win32",
+    stdio: ["ignore", "ignore", "ignore"]
+  });
+  let spawnError;
+  child.once("error", (error) => {
+    spawnError = error;
+  });
+  const deadline = Date.now() + options.timeoutMs;
+  while (Date.now() < deadline) {
+    if (spawnError) {
+      await terminate(child);
+      throw new ShimonError("web_server_start_failed", "Could not start the configured web server.", undefined, {
+        cause: spawnError
+      });
+    }
+    if (await reachable(options.url)) {
+      return { reused: false, close: () => terminate(child) };
+    }
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new ShimonError("web_server_exited", "The configured web server exited before it was ready.");
+    }
+    await delay(100);
+  }
+  await terminate(child);
+  throw new ShimonError("web_server_timeout", `Web server did not become ready at ${publicTargetUrl(options.url)} within ${options.timeoutMs}ms.`);
+}
+
+// src/verify.ts
+function configDigest(config) {
+  return createHash("sha256").update(JSON.stringify({
+    target: { url: publicTargetUrl(config.target.url), viewport: config.target.viewport },
+    cases: config.cases.map((testCase) => ({ name: testCase.name, viewport: testCase.viewport })),
+    freezeAnimations: config.freezeAnimations,
+    screenshot: config.screenshot,
+    timeouts: config.timeouts,
+    webServer: config.webServer
+  })).digest("hex");
+}
+function caseFilename(index, name) {
+  const slug = name.replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "case";
+  return `${String(index + 1).padStart(2, "0")}-${slug}.png`;
+}
+async function beforeDeadline(promise, deadline, code, message) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0)
+    throw new ShimonError(code, message);
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new ShimonError(code, message)), remaining);
+      })
+    ]);
+  } finally {
+    if (timer)
+      clearTimeout(timer);
+  }
+}
+async function verifyProject(config, options) {
+  const startedAt = Date.now();
+  const runDeadline = startedAt + (config.timeouts?.runMs ?? 120000);
+  const requestedCases = options.caseNames ?? [];
+  const knownCases = new Set(config.cases.map((testCase) => testCase.name));
+  const unknownCase = requestedCases.find((name) => !knownCases.has(name));
+  if (unknownCase) {
+    throw new ShimonError("case_not_found", `Unknown case: ${unknownCase}`, `Available cases: ${config.cases.map((testCase) => testCase.name).join(", ")}`);
+  }
+  const runId = randomUUID3();
+  const root = resolve2(options.root);
+  const runDirectory = join3(root, "runs", runId);
+  const screenshotDirectory = join3(runDirectory, "screenshots");
+  await mkdir2(screenshotDirectory, { recursive: true });
+  const selected = requestedCases.length ? config.cases.filter((testCase) => requestedCases.includes(testCase.name)) : config.cases;
+  let webServer;
+  if (config.webServer) {
+    const remaining = runDeadline - Date.now();
+    if (remaining <= 0) {
+      throw new ShimonError("run_timeout", "Verification run timed out before starting the web server.");
+    }
+    const serverWasRunBound = remaining < config.webServer.timeoutMs;
+    try {
+      webServer = await startManagedWebServer({
+        ...config.webServer,
+        timeoutMs: Math.min(config.webServer.timeoutMs, remaining),
+        cwd: options.cwd ?? process.cwd()
+      });
+    } catch (error) {
+      const failure = operationalError(error);
+      if (serverWasRunBound && failure.code === "web_server_timeout") {
+        throw new ShimonError("run_timeout", "Verification run timed out while starting the web server.");
+      }
+      throw error;
+    }
+  }
+  const cases = [];
+  try {
+    const browser = await beforeDeadline(chromium2.launch({ headless: true }), runDeadline, "run_timeout", "Verification run timed out while launching Chromium.");
+    try {
+      for (const [caseIndex, testCase] of selected.entries()) {
+        const caseBudgetDeadline = Date.now() + (config.timeouts?.caseMs ?? 20000);
+        const caseDeadline = Math.min(caseBudgetDeadline, runDeadline);
+        const deadlineCode = runDeadline <= caseBudgetDeadline ? "run_timeout" : "case_timeout";
+        const withinCase = (promise) => beforeDeadline(promise, caseDeadline, deadlineCode, deadlineCode === "run_timeout" ? `Verification run timed out during case: ${testCase.name}` : `Case timed out: ${testCase.name}`);
+        const viewport = testCase.viewport ?? config.target.viewport;
+        const context = await beforeDeadline(browser.newContext({ viewport }), runDeadline, "run_timeout", `Verification run timed out while creating context for case: ${testCase.name}`);
+        const screenshot = join3(screenshotDirectory, caseFilename(caseIndex, testCase.name));
+        try {
+          const page = await context.newPage();
+          page.setDefaultTimeout(config.timeouts?.caseMs ?? 20000);
+          try {
+            const failures = collectPageFailures(page);
+            await withinCase(page.goto(config.target.url, {
+              waitUntil: "load",
+              timeout: Math.min(config.timeouts?.navigationMs ?? 1e4, Math.max(1, caseDeadline - Date.now()))
+            }));
+            await withinCase(page.waitForLoadState("networkidle", { timeout: 1000 }).catch(() => {
+              return;
+            }));
+            const probe = await runConfiguredCase(page, config, testCase, withinCase);
+            await withinCase(page.screenshot({
+              path: screenshot,
+              fullPage: false,
+              mask: (config.screenshot?.mask ?? []).map((selector) => page.locator(selector)),
+              maskColor: "#000000"
+            }));
+            const checks = await withinCase(runPageChecks(page, failures));
+            const pass = Object.values(checks).every((check) => check.pass);
+            cases.push({
+              name: testCase.name,
+              status: "completed",
+              pass,
+              viewport,
+              probe,
+              checks,
+              evidence: { screenshot },
+              reproduce: `shimon verify --case ${testCase.name} --json`
+            });
+          } catch (error) {
+            const failure = operationalError(error);
+            if (failure.code === "run_timeout")
+              throw failure;
+            const evidence = await page.screenshot({
+              path: screenshot,
+              fullPage: false,
+              mask: (config.screenshot?.mask ?? []).map((selector) => page.locator(selector)),
+              maskColor: "#000000",
+              timeout: Math.min(config.timeouts?.caseMs ?? 20000, 2000)
+            }).then(() => screenshot).catch(() => null);
+            cases.push({
+              name: testCase.name,
+              status: "failed",
+              pass: false,
+              viewport,
+              probe: null,
+              checks: null,
+              evidence: { screenshot: evidence },
+              reproduce: `shimon verify --case ${testCase.name} --json`,
+              error: {
+                code: failure.code === "operation_failed" ? "case_execution_failed" : failure.code,
+                message: sanitizeDiagnosticText(failure.message),
+                ...failure.hint ? { hint: sanitizeDiagnosticText(failure.hint) } : {}
+              }
+            });
+          }
+        } finally {
+          await context.close();
+        }
+      }
+    } finally {
+      await browser.close();
+    }
+  } finally {
+    await webServer?.close();
+  }
+  const passed = cases.filter((testCase) => testCase.pass).length;
+  const manifest = join3(runDirectory, "manifest.json");
+  const result = {
+    schemaVersion: 1,
+    success: true,
+    pass: passed === cases.length,
+    command: "verify",
+    run: {
+      id: runId,
+      createdAt: new Date(startedAt).toISOString(),
+      configDigest: configDigest(config),
+      durationMs: Date.now() - startedAt,
+      webServer: { managed: webServer !== undefined, reused: webServer?.reused ?? false }
+    },
+    cases,
+    summary: { total: cases.length, passed, failed: cases.length - passed },
+    manifest
+  };
+  await writeJsonAtomic(manifest, result);
+  await writeJsonAtomic(join3(root, "latest.json"), { runId, manifest });
+  await pruneRunDirectories(root, 3);
+  return result;
 }
 
 // src/cli.ts
@@ -312,6 +841,7 @@ var HELP = `shimon ${TOOL_VERSION}
 
 Usage:
   shimon selftest [--config <path>] [--json]
+  shimon verify [--case <name>] [--config <path>] [--json]
   shimon capture <label> [--config <path>] [--json]
   shimon diff <before> <after> [--json]
 `;
@@ -322,10 +852,22 @@ function parseCliArgs(argv) {
   const positionals = [];
   let json = false;
   let configPath;
+  const caseNames = [];
   for (let index = 0;index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--json") {
       json = true;
+    } else if (argument === "--case") {
+      const caseName = argv[index + 1];
+      if (!caseName || caseName.startsWith("--"))
+        usage("--case requires a name.");
+      caseNames.push(caseName);
+      index += 1;
+    } else if (argument.startsWith("--case=")) {
+      const caseName = argument.slice("--case=".length);
+      if (!caseName)
+        usage("--case requires a name.");
+      caseNames.push(caseName);
     } else if (argument === "--config") {
       configPath = argv[index + 1];
       if (!configPath || configPath.startsWith("--"))
@@ -346,7 +888,7 @@ function parseCliArgs(argv) {
     }
   }
   const command = positionals.shift() ?? "help";
-  if (!["capture", "diff", "help", "selftest", "version"].includes(command)) {
+  if (!["capture", "diff", "help", "selftest", "verify", "version"].includes(command)) {
     usage(`Unknown command: ${command}`);
   }
   const required = command === "capture" ? 1 : command === "diff" ? 2 : 0;
@@ -357,7 +899,9 @@ function parseCliArgs(argv) {
       usage("diff requires two labels.");
     usage(`${command} does not accept labels.`);
   }
-  return { command, labels: positionals, json, configPath };
+  if (caseNames.length > 0 && command !== "verify")
+    usage("--case is only valid with verify.");
+  return { command, labels: positionals, caseNames, json, configPath };
 }
 function emit(value, json, human) {
   process.stdout.write(json ? `${JSON.stringify(value)}
@@ -378,7 +922,7 @@ async function run(args, cwd) {
 `);
     return 0;
   }
-  const root = resolve2(cwd, ".shimon");
+  const root = resolve3(cwd, ".shimon");
   if (args.command === "diff") {
     const [beforeLabel, afterLabel] = args.labels;
     const before = await readArtifact(root, beforeLabel);
@@ -389,6 +933,12 @@ async function run(args, cwd) {
     return identical ? 0 : 1;
   }
   const loaded = await loadConfig({ cwd, configPath: args.configPath });
+  if (args.command === "verify") {
+    progress(`verifying ${publicTargetUrl(loaded.config.target.url)}`);
+    const result = await verifyProject(loaded.config, { root, caseNames: args.caseNames, cwd });
+    emit(result, args.json, result.pass ? "verification passed" : "verification failed");
+    return result.pass ? 0 : 1;
+  }
   if (args.command === "capture") {
     const label = args.labels[0];
     progress(`capturing ${label} from ${publicTargetUrl(loaded.config.target.url)}`);
@@ -413,12 +963,22 @@ async function main(argv = process.argv.slice(2), cwd = process.cwd()) {
     return await run(args, cwd);
   } catch (error) {
     const failure = operationalError(error);
+    const message = sanitizeDiagnosticText(failure.message);
+    const hint = failure.hint ? sanitizeDiagnosticText(failure.hint) : undefined;
     const payload = {
-      ok: false,
-      error: { code: failure.code, message: failure.message, ...failure.hint ? { hint: failure.hint } : {} }
+      schemaVersion: 1,
+      success: false,
+      error: {
+        code: failure.code,
+        message,
+        ...hint ? { hint } : {}
+      }
     };
-    process.stderr.write(json ? `${JSON.stringify(payload)}
-` : `shimon: ${failure.message}
+    if (json)
+      process.stdout.write(`${JSON.stringify(payload)}
+`);
+    else
+      process.stderr.write(`shimon: ${message}
 `);
     return 2;
   }

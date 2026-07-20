@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { artifactPath, writeArtifact } from "../src/store.ts";
+import { artifactPath, readArtifact, writeArtifact } from "../src/store.ts";
 
 const roots: string[] = [];
 
@@ -28,5 +28,34 @@ describe("artifact store", () => {
   test("rejects labels that can escape the artifact directory", () => {
     expect(() => artifactPath(".shimon", "../outside")).toThrow("Invalid label");
     expect(() => artifactPath(".shimon", "..")).toThrow("Invalid label");
+  });
+
+  test("rejects artifacts that do not use the current schema", async () => {
+    const root = await mkdtemp(join(tmpdir(), "shimon-store-"));
+    roots.push(root);
+    await writeFile(join(root, "legacy.json"), '{"schemaVersion":1}\n');
+
+    await expect(readArtifact(root, "legacy")).rejects.toMatchObject({
+      code: "artifact_incompatible",
+    });
+  });
+
+  test("rejects malformed artifacts that claim the current schema", async () => {
+    const root = await mkdtemp(join(tmpdir(), "shimon-store-"));
+    roots.push(root);
+    await writeFile(
+      join(root, "malformed.json"),
+      JSON.stringify({
+        schemaVersion: 2,
+        toolVersion: "0.0.1",
+        target: { url: "https://example.com/" },
+        environment: {},
+        cases: [1],
+      }),
+    );
+
+    await expect(readArtifact(root, "malformed")).rejects.toMatchObject({
+      code: "artifact_invalid",
+    });
   });
 });

@@ -2,7 +2,7 @@
   "name": "@hayashiii/shimon",
   "version": "0.0.1",
   "private": true,
-  "description": "Deterministic UI fingerprints for agent-driven design work.",
+  "description": "Project-defined UI quality checks and evidence for coding agents.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/hayashiii-ghub/shimon.git"
@@ -25,6 +25,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "axe-core": "^4.12.1",
     "playwright": "^1.59.1"
   },
   "devDependencies": {
