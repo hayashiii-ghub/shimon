@@ -3,7 +3,7 @@ import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { ShimonError } from "./errors.ts";
-import type { LoadedConfig, ShimonCase, ShimonConfig, Viewport } from "./types.ts";
+import type { LoadedConfig, ProjectCheck, ShimonCase, ShimonConfig, Viewport } from "./types.ts";
 
 const DEFAULT_CONFIG = "shimon.config.mjs";
 const DEFAULT_VIEWPORT: Viewport = { width: 1200, height: 900 };
@@ -13,22 +13,73 @@ function invalid(message: string): never {
   throw new ShimonError("config_invalid", message, "Check shimon.config.mjs.");
 }
 
-function validateViewport(value: unknown): Viewport {
+function validateViewport(value: unknown, path = "target.viewport"): Viewport {
   if (value === undefined) return DEFAULT_VIEWPORT;
-  if (value === null || typeof value !== "object") invalid("target.viewport must be an object.");
+  if (value === null || typeof value !== "object") invalid(`${path} must be an object.`);
 
   const viewport = value as Partial<Viewport>;
   if (!Number.isInteger(viewport.width) || (viewport.width ?? 0) <= 0) {
-    invalid("target.viewport.width must be a positive integer.");
+    invalid(`${path}.width must be a positive integer.`);
   }
   if (!Number.isInteger(viewport.height) || (viewport.height ?? 0) <= 0) {
-    invalid("target.viewport.height must be a positive integer.");
+    invalid(`${path}.height must be a positive integer.`);
   }
   return { width: viewport.width as number, height: viewport.height as number };
 }
 
-function validateCases(value: unknown): ShimonCase[] {
-  if (!Array.isArray(value) || value.length === 0) invalid("cases must be a non-empty array.");
+function validateViewports(value: unknown): Record<string, Viewport> {
+  if (value === undefined) return {};
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    invalid("viewports must be an object.");
+  }
+
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([name, viewport]) => {
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name)) {
+        invalid(`viewport name ${JSON.stringify(name)} must use 1-64 letters, numbers, dots, dashes, or underscores.`);
+      }
+      return [name, validateViewport(viewport, `viewports.${name}`)];
+    }),
+  );
+}
+
+function validateOptionalText(value: unknown, path: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.trim() === "") invalid(`${path} must be a non-empty string.`);
+  return value;
+}
+
+function validateReview(value: unknown, path: string): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.trim() === "")) {
+    invalid(`${path} must be an array of non-empty strings.`);
+  }
+  return value as string[];
+}
+
+function validateProjectChecks(value: unknown, caseName: string, path: string): ProjectCheck[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) invalid(`${path} must be an array.`);
+  const ids = new Set<string>();
+  return value.map((candidate, index) => {
+    if (candidate === null || typeof candidate !== "object") invalid(`${path}[${index}] must be an object.`);
+    const check = candidate as Partial<ProjectCheck>;
+    if (typeof check.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(check.id)) {
+      invalid(`${path}[${index}].id must use 1-64 letters, numbers, dots, dashes, or underscores.`);
+    }
+    if (ids.has(check.id)) invalid(`Duplicate check id in case ${caseName}: ${check.id}`);
+    ids.add(check.id);
+    if (typeof check.description !== "string" || check.description.trim() === "") {
+      invalid(`${path}[${index}].description must be a non-empty string.`);
+    }
+    if (typeof check.evaluate !== "function") invalid(`${path}[${index}].evaluate must be a function.`);
+    return check as ProjectCheck;
+  });
+}
+
+function validateCases(value: unknown, viewports: Record<string, Viewport>): ShimonCase[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) invalid("cases must be an array.");
 
   const names = new Set<string>();
   return value.map((candidate, index) => {
@@ -45,9 +96,37 @@ function validateCases(value: unknown): ShimonCase[] {
     if (item.prepare !== undefined && typeof item.prepare !== "function") {
       invalid(`cases[${index}].prepare must be a function.`);
     }
+    const rawViewport = (candidate as Record<string, unknown>).viewport;
+    let viewport: Viewport | undefined;
+    let viewportName: string | undefined;
+    if (typeof rawViewport === "string") {
+      viewport = viewports[rawViewport];
+      if (!viewport) {
+        invalid(`cases[${index}].viewport references unknown viewport ${JSON.stringify(rawViewport)}.`);
+      }
+      viewportName = rawViewport;
+    } else if (rawViewport !== undefined) {
+      viewport = validateViewport(rawViewport, `cases[${index}].viewport`);
+    }
+    const path = validateOptionalText((candidate as Record<string, unknown>).path, `cases[${index}].path`);
+    if (
+      path !== undefined &&
+      (!path.startsWith("/") || path.startsWith("//") || path.startsWith("/\\"))
+    ) {
+      invalid(`cases[${index}].path must be a project-relative path starting with a single "/".`);
+    }
     return {
       name: item.name,
-      viewport: item.viewport === undefined ? undefined : validateViewport(item.viewport),
+      path,
+      viewport,
+      viewportName,
+      intent: validateOptionalText((candidate as Record<string, unknown>).intent, `cases[${index}].intent`),
+      review: validateReview((candidate as Record<string, unknown>).review, `cases[${index}].review`),
+      checks: validateProjectChecks(
+        (candidate as Record<string, unknown>).checks,
+        item.name,
+        `cases[${index}].checks`,
+      ),
       prepare: item.prepare,
     };
   });
@@ -122,7 +201,9 @@ function validateConfig(value: unknown): ShimonConfig {
   } catch {
     invalid("target.url must be an absolute URL.");
   }
-  if (typeof candidate.probe !== "function") invalid("probe must be a function.");
+  if (candidate.probe !== undefined && typeof candidate.probe !== "function") {
+    invalid("probe must be a function.");
+  }
   if (candidate.stabilize !== undefined && typeof candidate.stabilize !== "function") {
     invalid("stabilize must be a function.");
   }
@@ -130,13 +211,15 @@ function validateConfig(value: unknown): ShimonConfig {
     invalid("freezeAnimations must be a boolean.");
   }
 
+  const viewports = validateViewports(candidate.viewports);
   return {
     target: {
       url: targetValue.url,
       viewport: validateViewport(targetValue.viewport),
     },
-    cases: validateCases(candidate.cases),
-    probe: candidate.probe as ShimonConfig["probe"],
+    viewports,
+    cases: validateCases(candidate.cases, viewports),
+    probe: (candidate.probe ?? (() => ({}))) as ShimonConfig["probe"],
     stabilize: candidate.stabilize as ShimonConfig["stabilize"],
     freezeAnimations: candidate.freezeAnimations !== false,
     screenshot: validateScreenshot(candidate.screenshot),

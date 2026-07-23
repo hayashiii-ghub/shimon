@@ -1,8 +1,8 @@
 # Roadmap
 
-Shimon provides the execution skeleton for project-defined UI quality checks:
-repositories own states and probes, while shimon makes their checks and evidence
-repeatable for coding agents.
+Shimon provides the execution skeleton for task-specific UI quality checks:
+repositories own targets, responsive widths, and safety boundaries; agents own
+the smallest useful states and observations for the current change.
 
 ## Current boundary
 
@@ -13,8 +13,11 @@ repeatable for coding agents.
 - One Chromium process is shared per run; every case gets a fresh context/page.
 - Managed server readiness, case selection, timeout budgets, and structured JSON
   errors are part of the agent contract.
+- Cases can use project-relative paths and named responsive viewports, and carry
+  intent, machine checks, and screenshot review criteria.
 
-See [ADR 0001](docs/adr/0001-agent-ui-evidence-runner.md).
+See [ADR 0001](docs/adr/0001-agent-ui-evidence-runner.md) and
+[ADR 0002](docs/adr/0002-agent-authored-task-cases.md).
 
 ## Near term
 

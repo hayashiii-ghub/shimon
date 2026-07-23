@@ -15,7 +15,7 @@ const FREEZE_STYLES = `
 
 type Execute = <T>(promise: Promise<T>) => Promise<T>;
 
-function asJsonValue(value: unknown, path = "probe"): JsonValue {
+export function asJsonValue(value: unknown, path = "probe"): JsonValue {
   if (value === null || typeof value === "string" || typeof value === "boolean") return value;
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (Array.isArray(value)) return value.map((child, index) => asJsonValue(child, `${path}[${index}]`));

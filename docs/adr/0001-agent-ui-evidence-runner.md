@@ -44,7 +44,8 @@ an invitation to add image-diff infrastructure.
 
 - UI development can use one verify command instead of separate shot/check/
   inspect navigations.
-- Repositories must define stable case names, preparation, masks, and probes.
+- Repositories define stable execution and security boundaries; task-specific
+  case ownership is refined by ADR 0002.
 - Accessibility and security masking remain part of the minimum product.
 - Additional Playwright options are exposed only after multiple consumers show
   the same need.

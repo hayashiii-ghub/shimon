@@ -14,6 +14,106 @@ afterEach(async () => {
 });
 
 describe("verifyProject", () => {
+  test("requires an agent-authored case before starting a verification run", async () => {
+    const root = await mkdtemp(join(tmpdir(), "shimon-verify-"));
+    roots.push(root);
+    const config: ShimonConfig = {
+      target: { url: "http://127.0.0.1:4322/", viewport: { width: 320, height: 240 } },
+      freezeAnimations: true,
+      cases: [],
+      probe: () => ({}),
+    };
+
+    await expect(verifyProject(config, { root })).rejects.toMatchObject({
+      code: "cases_required",
+      hint: expect.stringContaining("task config"),
+    });
+  });
+
+  test("navigates to a case path and reports agent-authored intent, review, and project checks", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        const url = new URL(request.url);
+        return new Response(
+          `<!doctype html><html lang="en"><head><title>pricing</title></head><body><main><h1>Pricing</h1><a id="cta" href="/buy">Buy</a><p>${url.pathname}</p></main></body></html>`,
+          { headers: { "content-type": "text/html" } },
+        );
+      },
+    });
+    const root = await mkdtemp(join(tmpdir(), "shimon-verify-"));
+    roots.push(root);
+    const config: ShimonConfig = {
+      target: { url: `http://127.0.0.1:${server.port}/`, viewport: { width: 1440, height: 900 } },
+      freezeAnimations: true,
+      cases: [
+        {
+          name: "pricing-mobile",
+          path: "/pricing?cycle=monthly",
+          viewport: { width: 390, height: 844 },
+          viewportName: "mobile",
+          intent: "Verify the mobile pricing CTA.",
+          review: ["Pricing hierarchy is clear", "CTA is visually prominent"],
+          checks: [
+            {
+              id: "pricing-route",
+              description: "The pricing route rendered",
+              evaluate: (page) => page.evaluate(() => location.pathname === "/pricing"),
+            },
+            {
+              id: "cta-width",
+              description: "The CTA is wide enough to tap",
+              evaluate: async (page) => ({
+                pass: false,
+                evidence: await page.locator("#cta").evaluate((node) => ({
+                  text: node.textContent,
+                  width: Math.round(node.getBoundingClientRect().width),
+                })),
+              }),
+            },
+          ],
+        },
+      ],
+      probe: (page) => page.evaluate(() => ({ path: location.pathname, width: innerWidth })),
+    };
+
+    try {
+      const result = await verifyProject(config, {
+        root,
+        configPath: ".shimon/task.config.mjs",
+      });
+      const verifiedCase = result.cases[0];
+
+      expect(result.pass).toBeFalse();
+      expect(verifiedCase).toMatchObject({
+        name: "pricing-mobile",
+        url: `http://127.0.0.1:${server.port}/pricing`,
+        viewport: { width: 390, height: 844 },
+        viewportName: "mobile",
+        intent: "Verify the mobile pricing CTA.",
+        review: ["Pricing hierarchy is clear", "CTA is visually prominent"],
+        probe: { path: "/pricing", width: 390 },
+        reproduce:
+          'shimon verify --case pricing-mobile --config ".shimon/task.config.mjs" --json',
+      });
+      expect(verifiedCase.checks?.project).toEqual([
+        {
+          id: "pricing-route",
+          description: "The pricing route rendered",
+          pass: true,
+        },
+        {
+          id: "cta-width",
+          description: "The CTA is wide enough to tap",
+          pass: false,
+          evidence: { text: "Buy", width: expect.any(Number) },
+        },
+      ]);
+    } finally {
+      server.stop(true);
+    }
+  }, 30_000);
+
   test("manages the configured web server around the verification run", async () => {
     const reservation = Bun.serve({ port: 0, fetch: () => new Response("reserved") });
     const port = reservation.port;

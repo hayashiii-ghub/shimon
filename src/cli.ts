@@ -125,7 +125,12 @@ async function run(args: CliArgs, cwd: string): Promise<number> {
   const loaded = await loadConfig({ cwd, configPath: args.configPath });
   if (args.command === "verify") {
     progress(`verifying ${publicTargetUrl(loaded.config.target.url)}`);
-    const result = await verifyProject(loaded.config, { root, caseNames: args.caseNames, cwd });
+    const result = await verifyProject(loaded.config, {
+      root,
+      caseNames: args.caseNames,
+      cwd,
+      configPath: args.configPath,
+    });
     emit(result, args.json, result.pass ? "verification passed" : "verification failed");
     return result.pass ? 0 : 1;
   }

@@ -7,9 +7,32 @@ export interface Viewport {
   height: number;
 }
 
+export interface ProjectCheckResult {
+  id: string;
+  description: string;
+  pass: boolean;
+  evidence?: JsonValue;
+}
+
+export interface ProjectCheck {
+  id: string;
+  description: string;
+  evaluate: (
+    page: Page,
+  ) =>
+    | boolean
+    | { pass: boolean; evidence?: JsonValue }
+    | Promise<boolean | { pass: boolean; evidence?: JsonValue }>;
+}
+
 export interface ShimonCase {
   name: string;
+  path?: string;
   viewport?: Viewport;
+  viewportName?: string;
+  intent?: string;
+  review?: string[];
+  checks?: ProjectCheck[];
   prepare?: (page: Page) => Promise<void> | void;
 }
 
@@ -18,6 +41,7 @@ export interface ShimonConfig {
     url: string;
     viewport: Viewport;
   };
+  viewports?: Record<string, Viewport>;
   cases: ShimonCase[];
   probe: (page: Page) => Promise<JsonValue> | JsonValue;
   stabilize?: (page: Page) => Promise<void> | void;
@@ -59,6 +83,7 @@ export interface FingerprintArtifact {
   };
   cases: Array<{
     name: string;
+    url: string;
     viewport: Viewport;
     probe: JsonValue;
   }>;
