@@ -10,17 +10,22 @@ import { sanitizeDiagnosticText } from "./diagnostics.ts";
 import { operationalError, ShimonError } from "./errors.ts";
 import { pruneRunDirectories, writeJsonAtomic } from "./evidence.ts";
 import type { JsonValue } from "./canonicalize.ts";
-import type { ShimonConfig, Viewport } from "./types.ts";
+import { runProjectChecks } from "./project-checks.ts";
+import type { ProjectCheckResult, ShimonConfig, Viewport } from "./types.ts";
 import { publicTargetUrl } from "./url.ts";
 import { startManagedWebServer } from "./web-server.ts";
 
 export interface VerifyCaseResult {
   name: string;
+  url: string;
   status: "completed" | "failed";
   pass: boolean;
   viewport: Viewport;
+  viewportName: string | null;
+  intent: string | null;
+  review: string[];
   probe: JsonValue | null;
-  checks: PageChecks | null;
+  checks: (PageChecks & { project: ProjectCheckResult[] }) | null;
   evidence: { screenshot: string | null };
   reproduce: string;
   error?: { code: string; message: string; hint?: string };
@@ -48,7 +53,15 @@ function configDigest(config: ShimonConfig): string {
     .update(
       JSON.stringify({
         target: { url: publicTargetUrl(config.target.url), viewport: config.target.viewport },
-        cases: config.cases.map((testCase) => ({ name: testCase.name, viewport: testCase.viewport })),
+        cases: config.cases.map((testCase) => ({
+          name: testCase.name,
+          path: testCase.path,
+          viewport: testCase.viewport,
+          viewportName: testCase.viewportName,
+          intent: testCase.intent,
+          review: testCase.review,
+          checks: testCase.checks?.map(({ id, description }) => ({ id, description })),
+        })),
         freezeAnimations: config.freezeAnimations,
         screenshot: config.screenshot,
         timeouts: config.timeouts,
@@ -86,8 +99,15 @@ async function beforeDeadline<T>(
 
 export async function verifyProject(
   config: ShimonConfig,
-  options: { root: string; caseNames?: string[]; cwd?: string },
+  options: { root: string; caseNames?: string[]; cwd?: string; configPath?: string },
 ): Promise<VerifyResult> {
+  if (config.cases.length === 0) {
+    throw new ShimonError(
+      "cases_required",
+      "No verification cases are configured.",
+      "Create an agent-authored task config with at least one case and pass --config <path>.",
+    );
+  }
   const startedAt = Date.now();
   const runDeadline = startedAt + (config.timeouts?.runMs ?? 120_000);
   const requestedCases = options.caseNames ?? [];
@@ -130,6 +150,10 @@ export async function verifyProject(
     }
   }
   const cases: VerifyCaseResult[] = [];
+  const reproduce = (caseName: string): string =>
+    `shimon verify --case ${caseName}${
+      options.configPath ? ` --config ${JSON.stringify(options.configPath)}` : ""
+    } --json`;
 
   try {
     const browser = await beforeDeadline(
@@ -153,6 +177,11 @@ export async function verifyProject(
               : `Case timed out: ${testCase.name}`,
           );
         const viewport = testCase.viewport ?? config.target.viewport;
+        const caseUrl =
+          testCase.path === undefined
+            ? config.target.url
+            : new URL(testCase.path, config.target.url).toString();
+        const recordedCaseUrl = publicTargetUrl(caseUrl);
         const context = await beforeDeadline(
           browser.newContext({ viewport }),
           runDeadline,
@@ -166,7 +195,7 @@ export async function verifyProject(
           try {
             const failures = collectPageFailures(page);
             await withinCase(
-              page.goto(config.target.url, {
+              page.goto(caseUrl, {
                 waitUntil: "load",
                 timeout: Math.min(
                   config.timeouts?.navigationMs ?? 10_000,
@@ -186,17 +215,25 @@ export async function verifyProject(
                 maskColor: "#000000",
               }),
             );
-            const checks = await withinCase(runPageChecks(page, failures));
-            const pass = Object.values(checks).every((check) => check.pass);
+            const builtInChecks = await withinCase(runPageChecks(page, failures));
+            const project = await runProjectChecks(page, testCase.checks, withinCase);
+            const checks = { ...builtInChecks, project };
+            const pass =
+              Object.values(builtInChecks).every((check) => check.pass) &&
+              project.every((check) => check.pass);
             cases.push({
               name: testCase.name,
+              url: recordedCaseUrl,
               status: "completed",
               pass,
               viewport,
+              viewportName: testCase.viewportName ?? null,
+              intent: testCase.intent ?? null,
+              review: testCase.review ?? [],
               probe,
               checks,
               evidence: { screenshot },
-              reproduce: `shimon verify --case ${testCase.name} --json`,
+              reproduce: reproduce(testCase.name),
             });
           } catch (error) {
             const failure = operationalError(error);
@@ -213,13 +250,17 @@ export async function verifyProject(
               .catch(() => null);
             cases.push({
               name: testCase.name,
+              url: recordedCaseUrl,
               status: "failed",
               pass: false,
               viewport,
+              viewportName: testCase.viewportName ?? null,
+              intent: testCase.intent ?? null,
+              review: testCase.review ?? [],
               probe: null,
               checks: null,
               evidence: { screenshot: evidence },
-              reproduce: `shimon verify --case ${testCase.name} --json`,
+              reproduce: reproduce(testCase.name),
               error: {
                 code: failure.code === "operation_failed" ? "case_execution_failed" : failure.code,
                 message: sanitizeDiagnosticText(failure.message),

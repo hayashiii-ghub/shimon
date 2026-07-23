@@ -35,23 +35,77 @@ var DEFAULT_TIMEOUTS = { runMs: 120000, caseMs: 20000, navigationMs: 1e4 };
 function invalid(message) {
   throw new ShimonError("config_invalid", message, "Check shimon.config.mjs.");
 }
-function validateViewport(value) {
+function validateViewport(value, path = "target.viewport") {
   if (value === undefined)
     return DEFAULT_VIEWPORT;
   if (value === null || typeof value !== "object")
-    invalid("target.viewport must be an object.");
+    invalid(`${path} must be an object.`);
   const viewport = value;
   if (!Number.isInteger(viewport.width) || (viewport.width ?? 0) <= 0) {
-    invalid("target.viewport.width must be a positive integer.");
+    invalid(`${path}.width must be a positive integer.`);
   }
   if (!Number.isInteger(viewport.height) || (viewport.height ?? 0) <= 0) {
-    invalid("target.viewport.height must be a positive integer.");
+    invalid(`${path}.height must be a positive integer.`);
   }
   return { width: viewport.width, height: viewport.height };
 }
-function validateCases(value) {
-  if (!Array.isArray(value) || value.length === 0)
-    invalid("cases must be a non-empty array.");
+function validateViewports(value) {
+  if (value === undefined)
+    return {};
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    invalid("viewports must be an object.");
+  }
+  return Object.fromEntries(Object.entries(value).map(([name, viewport]) => {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name)) {
+      invalid(`viewport name ${JSON.stringify(name)} must use 1-64 letters, numbers, dots, dashes, or underscores.`);
+    }
+    return [name, validateViewport(viewport, `viewports.${name}`)];
+  }));
+}
+function validateOptionalText(value, path) {
+  if (value === undefined)
+    return;
+  if (typeof value !== "string" || value.trim() === "")
+    invalid(`${path} must be a non-empty string.`);
+  return value;
+}
+function validateReview(value, path) {
+  if (value === undefined)
+    return;
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.trim() === "")) {
+    invalid(`${path} must be an array of non-empty strings.`);
+  }
+  return value;
+}
+function validateProjectChecks(value, caseName, path) {
+  if (value === undefined)
+    return;
+  if (!Array.isArray(value))
+    invalid(`${path} must be an array.`);
+  const ids = new Set;
+  return value.map((candidate, index) => {
+    if (candidate === null || typeof candidate !== "object")
+      invalid(`${path}[${index}] must be an object.`);
+    const check = candidate;
+    if (typeof check.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(check.id)) {
+      invalid(`${path}[${index}].id must use 1-64 letters, numbers, dots, dashes, or underscores.`);
+    }
+    if (ids.has(check.id))
+      invalid(`Duplicate check id in case ${caseName}: ${check.id}`);
+    ids.add(check.id);
+    if (typeof check.description !== "string" || check.description.trim() === "") {
+      invalid(`${path}[${index}].description must be a non-empty string.`);
+    }
+    if (typeof check.evaluate !== "function")
+      invalid(`${path}[${index}].evaluate must be a function.`);
+    return check;
+  });
+}
+function validateCases(value, viewports) {
+  if (value === undefined)
+    return [];
+  if (!Array.isArray(value))
+    invalid("cases must be an array.");
   const names = new Set;
   return value.map((candidate, index) => {
     if (candidate === null || typeof candidate !== "object")
@@ -69,9 +123,30 @@ function validateCases(value) {
     if (item.prepare !== undefined && typeof item.prepare !== "function") {
       invalid(`cases[${index}].prepare must be a function.`);
     }
+    const rawViewport = candidate.viewport;
+    let viewport;
+    let viewportName;
+    if (typeof rawViewport === "string") {
+      viewport = viewports[rawViewport];
+      if (!viewport) {
+        invalid(`cases[${index}].viewport references unknown viewport ${JSON.stringify(rawViewport)}.`);
+      }
+      viewportName = rawViewport;
+    } else if (rawViewport !== undefined) {
+      viewport = validateViewport(rawViewport, `cases[${index}].viewport`);
+    }
+    const path = validateOptionalText(candidate.path, `cases[${index}].path`);
+    if (path !== undefined && (!path.startsWith("/") || path.startsWith("//") || path.startsWith("/\\"))) {
+      invalid(`cases[${index}].path must be a project-relative path starting with a single "/".`);
+    }
     return {
       name: item.name,
-      viewport: item.viewport === undefined ? undefined : validateViewport(item.viewport),
+      path,
+      viewport,
+      viewportName,
+      intent: validateOptionalText(candidate.intent, `cases[${index}].intent`),
+      review: validateReview(candidate.review, `cases[${index}].review`),
+      checks: validateProjectChecks(candidate.checks, item.name, `cases[${index}].checks`),
       prepare: item.prepare
     };
   });
@@ -151,21 +226,24 @@ function validateConfig(value) {
   } catch {
     invalid("target.url must be an absolute URL.");
   }
-  if (typeof candidate.probe !== "function")
+  if (candidate.probe !== undefined && typeof candidate.probe !== "function") {
     invalid("probe must be a function.");
+  }
   if (candidate.stabilize !== undefined && typeof candidate.stabilize !== "function") {
     invalid("stabilize must be a function.");
   }
   if (candidate.freezeAnimations !== undefined && typeof candidate.freezeAnimations !== "boolean") {
     invalid("freezeAnimations must be a boolean.");
   }
+  const viewports = validateViewports(candidate.viewports);
   return {
     target: {
       url: targetValue.url,
       viewport: validateViewport(targetValue.viewport)
     },
-    cases: validateCases(candidate.cases),
-    probe: candidate.probe,
+    viewports,
+    cases: validateCases(candidate.cases, viewports),
+    probe: candidate.probe ?? (() => ({})),
     stabilize: candidate.stabilize,
     freezeAnimations: candidate.freezeAnimations !== false,
     screenshot: validateScreenshot(candidate.screenshot),
@@ -316,6 +394,9 @@ var TOOL_VERSION = "0.0.1";
 
 // src/runner.ts
 async function captureFingerprint(config) {
+  if (config.cases.length === 0) {
+    throw new ShimonError("cases_required", "No verification cases are configured.", "Create an agent-authored task config with at least one case and pass --config <path>.");
+  }
   const browser = await chromium.launch({ headless: true });
   try {
     const recordedUrl = publicTargetUrl(config.target.url);
@@ -323,19 +404,19 @@ async function captureFingerprint(config) {
     let runtime;
     for (const testCase of config.cases) {
       const viewport = testCase.viewport ?? config.target.viewport;
+      const caseUrl = testCase.path === undefined ? config.target.url : new URL(testCase.path, config.target.url).toString();
+      const recordedCaseUrl = publicTargetUrl(caseUrl);
       const context = await browser.newContext({ viewport });
       try {
         const page = await context.newPage();
         let response;
         try {
-          response = await page.goto(config.target.url, { waitUntil: "load" });
+          response = await page.goto(caseUrl, { waitUntil: "load" });
         } catch (error) {
-          throw new ShimonError("target_navigation_failed", `Could not load target: ${recordedUrl}`, undefined, {
-            cause: error
-          });
+          throw new ShimonError("target_navigation_failed", `Could not load target: ${recordedCaseUrl}`, undefined, { cause: error });
         }
         if (response && !response.ok()) {
-          throw new ShimonError("target_http_error", `Target returned HTTP ${response.status()}: ${recordedUrl}`);
+          throw new ShimonError("target_http_error", `Target returned HTTP ${response.status()}: ${recordedCaseUrl}`);
         }
         await page.waitForLoadState("networkidle", { timeout: 1000 }).catch(() => {
           return;
@@ -346,13 +427,13 @@ async function captureFingerprint(config) {
           timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
         }));
         const probe = await runConfiguredCase(page, config, testCase);
-        cases.push({ name: testCase.name, viewport, probe });
+        cases.push({ name: testCase.name, url: recordedCaseUrl, viewport, probe });
       } finally {
         await context.close();
       }
     }
     if (!runtime)
-      throw new ShimonError("config_invalid", "At least one case is required.");
+      throw new ShimonError("cases_required", "No verification cases are configured.");
     return {
       schemaVersion: 2,
       toolVersion: TOOL_VERSION,
@@ -578,6 +659,28 @@ async function pruneRunDirectories(root, keep) {
   return removed;
 }
 
+// src/project-checks.ts
+async function runProjectChecks(page, checks = [], execute = async (promise) => promise) {
+  const results = [];
+  for (const check of checks) {
+    const value = await execute(Promise.resolve().then(() => check.evaluate(page)));
+    if (typeof value === "boolean") {
+      results.push({ id: check.id, description: check.description, pass: value });
+      continue;
+    }
+    if (value === null || typeof value !== "object" || typeof value.pass !== "boolean") {
+      throw new ShimonError("check_invalid", `Check ${check.id} must return a boolean or { pass, evidence? }.`);
+    }
+    results.push({
+      id: check.id,
+      description: check.description,
+      pass: value.pass,
+      ...value.evidence === undefined ? {} : { evidence: asJsonValue(value.evidence, `checks.${check.id}.evidence`) }
+    });
+  }
+  return results;
+}
+
 // src/web-server.ts
 import { spawn } from "node:child_process";
 async function reachable(url) {
@@ -668,7 +771,15 @@ async function startManagedWebServer(options) {
 function configDigest(config) {
   return createHash("sha256").update(JSON.stringify({
     target: { url: publicTargetUrl(config.target.url), viewport: config.target.viewport },
-    cases: config.cases.map((testCase) => ({ name: testCase.name, viewport: testCase.viewport })),
+    cases: config.cases.map((testCase) => ({
+      name: testCase.name,
+      path: testCase.path,
+      viewport: testCase.viewport,
+      viewportName: testCase.viewportName,
+      intent: testCase.intent,
+      review: testCase.review,
+      checks: testCase.checks?.map(({ id, description }) => ({ id, description }))
+    })),
     freezeAnimations: config.freezeAnimations,
     screenshot: config.screenshot,
     timeouts: config.timeouts,
@@ -697,6 +808,9 @@ async function beforeDeadline(promise, deadline, code, message) {
   }
 }
 async function verifyProject(config, options) {
+  if (config.cases.length === 0) {
+    throw new ShimonError("cases_required", "No verification cases are configured.", "Create an agent-authored task config with at least one case and pass --config <path>.");
+  }
   const startedAt = Date.now();
   const runDeadline = startedAt + (config.timeouts?.runMs ?? 120000);
   const requestedCases = options.caseNames ?? [];
@@ -733,6 +847,7 @@ async function verifyProject(config, options) {
     }
   }
   const cases = [];
+  const reproduce = (caseName) => `shimon verify --case ${caseName}${options.configPath ? ` --config ${JSON.stringify(options.configPath)}` : ""} --json`;
   try {
     const browser = await beforeDeadline(chromium2.launch({ headless: true }), runDeadline, "run_timeout", "Verification run timed out while launching Chromium.");
     try {
@@ -742,6 +857,8 @@ async function verifyProject(config, options) {
         const deadlineCode = runDeadline <= caseBudgetDeadline ? "run_timeout" : "case_timeout";
         const withinCase = (promise) => beforeDeadline(promise, caseDeadline, deadlineCode, deadlineCode === "run_timeout" ? `Verification run timed out during case: ${testCase.name}` : `Case timed out: ${testCase.name}`);
         const viewport = testCase.viewport ?? config.target.viewport;
+        const caseUrl = testCase.path === undefined ? config.target.url : new URL(testCase.path, config.target.url).toString();
+        const recordedCaseUrl = publicTargetUrl(caseUrl);
         const context = await beforeDeadline(browser.newContext({ viewport }), runDeadline, "run_timeout", `Verification run timed out while creating context for case: ${testCase.name}`);
         const screenshot = join3(screenshotDirectory, caseFilename(caseIndex, testCase.name));
         try {
@@ -749,7 +866,7 @@ async function verifyProject(config, options) {
           page.setDefaultTimeout(config.timeouts?.caseMs ?? 20000);
           try {
             const failures = collectPageFailures(page);
-            await withinCase(page.goto(config.target.url, {
+            await withinCase(page.goto(caseUrl, {
               waitUntil: "load",
               timeout: Math.min(config.timeouts?.navigationMs ?? 1e4, Math.max(1, caseDeadline - Date.now()))
             }));
@@ -763,17 +880,23 @@ async function verifyProject(config, options) {
               mask: (config.screenshot?.mask ?? []).map((selector) => page.locator(selector)),
               maskColor: "#000000"
             }));
-            const checks = await withinCase(runPageChecks(page, failures));
-            const pass = Object.values(checks).every((check) => check.pass);
+            const builtInChecks = await withinCase(runPageChecks(page, failures));
+            const project = await runProjectChecks(page, testCase.checks, withinCase);
+            const checks = { ...builtInChecks, project };
+            const pass = Object.values(builtInChecks).every((check) => check.pass) && project.every((check) => check.pass);
             cases.push({
               name: testCase.name,
+              url: recordedCaseUrl,
               status: "completed",
               pass,
               viewport,
+              viewportName: testCase.viewportName ?? null,
+              intent: testCase.intent ?? null,
+              review: testCase.review ?? [],
               probe,
               checks,
               evidence: { screenshot },
-              reproduce: `shimon verify --case ${testCase.name} --json`
+              reproduce: reproduce(testCase.name)
             });
           } catch (error) {
             const failure = operationalError(error);
@@ -788,13 +911,17 @@ async function verifyProject(config, options) {
             }).then(() => screenshot).catch(() => null);
             cases.push({
               name: testCase.name,
+              url: recordedCaseUrl,
               status: "failed",
               pass: false,
               viewport,
+              viewportName: testCase.viewportName ?? null,
+              intent: testCase.intent ?? null,
+              review: testCase.review ?? [],
               probe: null,
               checks: null,
               evidence: { screenshot: evidence },
-              reproduce: `shimon verify --case ${testCase.name} --json`,
+              reproduce: reproduce(testCase.name),
               error: {
                 code: failure.code === "operation_failed" ? "case_execution_failed" : failure.code,
                 message: sanitizeDiagnosticText(failure.message),
@@ -935,7 +1062,12 @@ async function run(args, cwd) {
   const loaded = await loadConfig({ cwd, configPath: args.configPath });
   if (args.command === "verify") {
     progress(`verifying ${publicTargetUrl(loaded.config.target.url)}`);
-    const result = await verifyProject(loaded.config, { root, caseNames: args.caseNames, cwd });
+    const result = await verifyProject(loaded.config, {
+      root,
+      caseNames: args.caseNames,
+      cwd,
+      configPath: args.configPath
+    });
     emit(result, args.json, result.pass ? "verification passed" : "verification failed");
     return result.pass ? 0 : 1;
   }

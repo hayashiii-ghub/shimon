@@ -1,10 +1,14 @@
 # shimon
 
-Turn project-defined UI quality checks into repeatable evidence for coding agents.
+Turn task-specific UI quality checks into repeatable evidence for coding agents.
 
-`shimon` runs repository-owned UI states in isolated browser contexts and returns
-the probe values, health checks, and screenshots an agent needs to judge a UI
-change. It does not decide whether a design is good and it does not impose a
+The repository owns only the execution skeleton: target, development server,
+named responsive widths, and security masks. For each change, an agent derives
+the smallest useful cases and review criteria from the task and code, then
+`shimon` runs those states in isolated browser contexts and returns structured
+checks and screenshots.
+
+Shimon does not decide whether a design is good and it does not impose a
 component, token, or CSS system.
 
 ## Agent loop
@@ -17,7 +21,8 @@ shimon verify --case menu-mobile --json
 One `verify` run launches Chromium once. Each case gets a fresh context and page,
 then produces:
 
-- the project-defined `probe`;
+- the case URL, intent, named viewport, and screenshot review criteria;
+- the agent-defined `probe` and project checks;
 - overflow offenders with selectors and boxes;
 - console and uncaught page errors;
 - failed requests with redacted URLs;
@@ -47,15 +52,18 @@ schema-versioned fingerprint atomically, and `diff` reports changed JSON paths.
 Screenshots, durations, run IDs, and file paths are evidence and are not part of
 fingerprint comparison.
 
-## Config
+## Project-owned skeleton
 
-The default file is `shimon.config.mjs`:
+The default `shimon.config.mjs` can contain no cases. A project normally owns
+only this stable skeleton:
 
 ```js
 export default {
-  target: {
-    url: "http://127.0.0.1:4322/",
-    viewport: { width: 1200, height: 900 },
+  target: { url: "http://127.0.0.1:4322/" },
+  viewports: {
+    desktop: { width: 1440, height: 900 },
+    tablet: { width: 768, height: 1024 },
+    mobile: { width: 390, height: 844 },
   },
   webServer: {
     command: "bun run dev",
@@ -65,25 +73,76 @@ export default {
   },
   timeouts: { runMs: 120_000, caseMs: 20_000, navigationMs: 10_000 },
   screenshot: { mask: ["[data-sensitive]", ".account-email"] },
+};
+```
+
+Loading this skeleton is valid. Running it without any cases exits with the
+operational error `cases_required`, so an empty run can never pass silently.
+
+Named viewports are CSS viewport sizes, not full device emulation. They give
+agents stable project-approved desktop, tablet, and mobile widths without
+hard-coding widths into every task.
+
+## Agent-authored task config
+
+For a UI task, the agent creates an ephemeral `.shimon/task.config.mjs` that
+extends the skeleton:
+
+```js
+import base from "../shimon.config.mjs";
+
+export default {
+  ...base,
   cases: [
-    { name: "home" },
     {
-      name: "menu-mobile",
-      viewport: { width: 390, height: 844 },
+      name: "pricing-menu-mobile",
+      path: "/pricing",
+      viewport: "mobile",
+      intent: "Verify the changed pricing menu at the narrow layout.",
       prepare: (page) => page.getByRole("button", { name: "Menu" }).click(),
+      checks: [
+        {
+          id: "menu-visible",
+          description: "The opened menu remains inside the viewport",
+          async evaluate(page) {
+            const menu = page.getByRole("navigation");
+            return {
+              pass: await menu.isVisible(),
+              evidence: { links: await menu.getByRole("link").count() },
+            };
+          },
+        },
+      ],
+      review: [
+        "Menu hierarchy is clear",
+        "Primary CTA remains prominent",
+        "No content appears clipped or overlapped",
+      ],
     },
   ],
-  async stabilize(page) {
-    await page.evaluate(() => document.fonts.ready);
-  },
   probe(page) {
     return page.evaluate(() => ({
-      menuTransform: getComputedStyle(document.querySelector("nav")).transform,
-      selectedItem: document.querySelector("[aria-current=page]")?.textContent ?? null,
+      path: location.pathname,
+      width: innerWidth,
     }));
   },
 };
 ```
+
+```sh
+shimon verify --config .shimon/task.config.mjs --json
+```
+
+`path` is resolved against `target.url` and must start with a single `/`.
+`prepare(page)` creates an interaction state. `checks` are machine-passable assertions and may
+return a boolean or `{ pass, evidence }`. `review` contains visual questions for
+the calling agent; shimon returns them with the screenshot but does not pretend
+to judge them itself. Check evidence and probes must be JSON-serializable.
+
+If the base config already contains durable cases, the task config should retain
+them with `cases: [...(base.cases ?? []), ...taskCases]`. Agents must not delete
+or weaken stable cases to make a change pass. Promote a task case into the base
+config only when it expresses a durable product invariant.
 
 Animations and transitions are disabled before stabilization by default. Set
 `freezeAnimations: false` only when motion itself is the invariant. Case names

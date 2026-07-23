@@ -4,6 +4,34 @@ import { captureFingerprint } from "../src/runner.ts";
 import type { ShimonConfig } from "../src/types.ts";
 
 describe("captureFingerprint", () => {
+  test("navigates to each case path", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch: (request) =>
+        new Response(`<main>${new URL(request.url).pathname}</main>`, {
+          headers: { "content-type": "text/html" },
+        }),
+    });
+    try {
+      const config: ShimonConfig = {
+        target: { url: `http://127.0.0.1:${server.port}/`, viewport: { width: 640, height: 480 } },
+        freezeAnimations: true,
+        cases: [{ name: "pricing", path: "/pricing?token=secret" }],
+        probe: (page) => page.evaluate(() => ({ path: location.pathname })),
+      };
+
+      const artifact = await captureFingerprint(config);
+
+      expect(artifact.cases[0]).toMatchObject({
+        name: "pricing",
+        url: `http://127.0.0.1:${server.port}/pricing`,
+        probe: { path: "/pricing" },
+      });
+    } finally {
+      server.stop(true);
+    }
+  }, 30_000);
+
   test("isolates cases and records each case viewport", async () => {
     const html = `<!doctype html><button id="change" onclick="document.body.dataset.value = 'changed'">change</button>`;
     const config: ShimonConfig = {
@@ -28,11 +56,13 @@ describe("captureFingerprint", () => {
     expect(artifact.cases).toEqual([
       {
         name: "changed",
+        url: "data:",
         viewport: { width: 640, height: 480 },
         probe: { value: "changed", width: 640 },
       },
       {
         name: "fresh",
+        url: "data:",
         viewport: { width: 390, height: 844 },
         probe: { value: "initial", width: 390 },
       },
@@ -73,11 +103,13 @@ describe("captureFingerprint", () => {
     expect(artifact.cases).toEqual([
       {
         name: "start",
+        url: "data:",
         viewport: { width: 640, height: 480 },
         probe: { animation: "none", stable: "yes", value: "0" },
       },
       {
         name: "stepped",
+        url: "data:",
         viewport: { width: 640, height: 480 },
         probe: { animation: "none", stable: "yes", value: "1" },
       },
@@ -113,6 +145,7 @@ describe("captureFingerprint", () => {
 
         expect(artifact.cases[0]).toEqual({
           name: "ready",
+          url: `http://127.0.0.1:${server.port}/`,
           viewport: { width: 640, height: 480 },
           probe: { text: "ready" },
         });
