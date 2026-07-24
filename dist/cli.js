@@ -868,7 +868,7 @@ async function verifyProject(config, options) {
             const failures = collectPageFailures(page);
             await withinCase(page.goto(caseUrl, {
               waitUntil: "load",
-              timeout: Math.min(config.timeouts?.navigationMs ?? 1e4, Math.max(1, caseDeadline - Date.now()))
+              timeout: config.timeouts?.navigationMs ?? 1e4
             }));
             await withinCase(page.waitForLoadState("networkidle", { timeout: 1000 }).catch(() => {
               return;
