@@ -11,11 +11,26 @@ checks and screenshots.
 Shimon does not decide whether a design is good and it does not impose a
 component, token, or CSS system.
 
+## Install
+
+Shimon requires Node.js 22 or newer and Chromium for Playwright.
+
+```sh
+npm install --save-dev @hayashiii/shimon
+npx playwright install chromium
+```
+
+Run the project-local CLI with `npx shimon`:
+
+```sh
+npx shimon verify --json
+```
+
 ## Agent loop
 
 ```sh
-shimon verify --json
-shimon verify --case menu-mobile --json
+npx shimon verify --json
+npx shimon verify --case menu-mobile --json
 ```
 
 One `verify` run launches Chromium once. Each case gets a fresh context and page,
@@ -41,10 +56,10 @@ goes to stderr.
 ## Fingerprints
 
 ```sh
-shimon selftest
-shimon capture baseline
-shimon capture current
-shimon diff baseline current
+npx shimon selftest
+npx shimon capture baseline
+npx shimon capture current
+npx shimon diff baseline current
 ```
 
 `selftest` compares two fresh captures for nondeterminism. `capture` writes a
@@ -130,7 +145,7 @@ export default {
 ```
 
 ```sh
-shimon verify --config .shimon/task.config.mjs --json
+npx shimon verify --config .shimon/task.config.mjs --json
 ```
 
 `path` is resolved against `target.url` and must start with a single `/`.

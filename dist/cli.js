@@ -390,7 +390,7 @@ async function runConfiguredCase(page, config, testCase, execute = async (promis
 }
 
 // src/version.ts
-var TOOL_VERSION = "0.0.1";
+var TOOL_VERSION = "0.1.0";
 
 // src/runner.ts
 async function captureFingerprint(config) {

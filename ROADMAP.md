@@ -36,11 +36,12 @@ See [ADR 0001](docs/adr/0001-agent-ui-evidence-runner.md) and
 
 ### Distribution
 
-- Add CI for tests, type checking, package build, and bin-symlink smoke testing.
-- Test supported Node.js and Playwright versions on macOS and Linux.
-- Pilot with two structurally different consumers.
-- Remove `private: true` and publish only after the command and artifact
-  contracts survive those pilots.
+- Publish 0.1.x as a public preview with manual npm releases.
+- Run tests, type checking, package build, and packed-CLI smoke tests on macOS
+  and Linux.
+- Pilot with two structurally different consumers before committing to 1.0
+  compatibility.
+- Automate publishing only if manual releases become a repeated burden.
 
 ### Agent ergonomics
 
@@ -58,9 +59,9 @@ See [ADR 0001](docs/adr/0001-agent-ui-evidence-runner.md) and
 - A plugin system before multiple consumers demonstrate a repeated boundary.
 - Running config from untrusted repositories.
 
-## Release readiness
+## Stable release readiness
 
-A public release should have:
+A stable 1.0 release should have:
 
 - deterministic selftests and verify runs in at least two real consumers;
 - documented artifact and verify-result compatibility behavior;
