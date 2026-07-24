@@ -390,7 +390,7 @@ async function runConfiguredCase(page, config, testCase, execute = async (promis
 }
 
 // src/version.ts
-var TOOL_VERSION = "0.0.1";
+var TOOL_VERSION = "0.1.0";
 
 // src/runner.ts
 async function captureFingerprint(config) {
@@ -868,7 +868,7 @@ async function verifyProject(config, options) {
             const failures = collectPageFailures(page);
             await withinCase(page.goto(caseUrl, {
               waitUntil: "load",
-              timeout: Math.min(config.timeouts?.navigationMs ?? 1e4, Math.max(1, caseDeadline - Date.now()))
+              timeout: config.timeouts?.navigationMs ?? 1e4
             }));
             await withinCase(page.waitForLoadState("networkidle", { timeout: 1000 }).catch(() => {
               return;

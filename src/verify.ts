@@ -197,10 +197,7 @@ export async function verifyProject(
             await withinCase(
               page.goto(caseUrl, {
                 waitUntil: "load",
-                timeout: Math.min(
-                  config.timeouts?.navigationMs ?? 10_000,
-                  Math.max(1, caseDeadline - Date.now()),
-                ),
+                timeout: config.timeouts?.navigationMs ?? 10_000,
               }),
             );
             await withinCase(

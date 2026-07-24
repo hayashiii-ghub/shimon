@@ -1,11 +1,14 @@
 {
   "name": "@hayashiii/shimon",
-  "version": "0.0.1",
-  "private": true,
+  "version": "0.1.0",
   "description": "Project-defined UI quality checks and evidence for coding agents.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/hayashiii-ghub/shimon.git"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
   },
   "type": "module",
   "bin": {
