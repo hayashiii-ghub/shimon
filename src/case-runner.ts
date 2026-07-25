@@ -1,7 +1,5 @@
 import type { Page } from "playwright";
 
-import type { JsonValue } from "./canonicalize.ts";
-import { ShimonError } from "./errors.ts";
 import type { ShimonCase, ShimonConfig } from "./types.ts";
 
 const FREEZE_STYLES = `
@@ -15,26 +13,6 @@ const FREEZE_STYLES = `
 
 type Execute = <T>(promise: Promise<T>) => Promise<T>;
 
-export function asJsonValue(value: unknown, path = "probe"): JsonValue {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (Array.isArray(value)) return value.map((child, index) => asJsonValue(child, `${path}[${index}]`));
-  if (value !== null && typeof value === "object") {
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) {
-      throw new ShimonError("probe_invalid", `${path} must be a plain JSON object.`);
-    }
-    return Object.fromEntries(
-      Object.entries(value).map(([key, child]) => [key, asJsonValue(child, `${path}.${key}`)]),
-    );
-  }
-  throw new ShimonError(
-    "probe_invalid",
-    `${path} is not JSON-serializable.`,
-    "Return only objects, arrays, strings, finite numbers, booleans, or null from probe().",
-  );
-}
-
 async function settle(page: Page): Promise<void> {
   await page.evaluate(
     () =>
@@ -44,12 +22,12 @@ async function settle(page: Page): Promise<void> {
   );
 }
 
-export async function runConfiguredCase(
+export async function prepareConfiguredCase(
   page: Page,
   config: ShimonConfig,
   testCase: ShimonCase,
   execute: Execute = async (promise) => promise,
-): Promise<JsonValue> {
+): Promise<void> {
   if (config.freezeAnimations) {
     await execute(page.addStyleTag({ content: FREEZE_STYLES }).then(() => undefined));
   }
@@ -62,8 +40,4 @@ export async function runConfiguredCase(
     await execute(Promise.resolve().then(() => testCase.prepare!(page)));
   }
   await execute(settle(page));
-  return asJsonValue(
-    await execute(Promise.resolve().then(() => config.probe(page))),
-    `cases.${testCase.name}.probe`,
-  );
 }

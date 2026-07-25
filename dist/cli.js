@@ -32,8 +32,8 @@ function operationalError(error) {
 var DEFAULT_CONFIG = "shimon.config.mjs";
 var DEFAULT_VIEWPORT = { width: 1200, height: 900 };
 var DEFAULT_TIMEOUTS = { runMs: 120000, caseMs: 20000, navigationMs: 1e4 };
-function invalid(message) {
-  throw new ShimonError("config_invalid", message, "Check shimon.config.mjs.");
+function invalid(message, hint = "Check shimon.config.mjs.") {
+  throw new ShimonError("config_invalid", message, hint);
 }
 function validateViewport(value, path = "target.viewport") {
   if (value === undefined)
@@ -226,9 +226,6 @@ function validateConfig(value) {
   } catch {
     invalid("target.url must be an absolute URL.");
   }
-  if (candidate.probe !== undefined && typeof candidate.probe !== "function") {
-    invalid("probe must be a function.");
-  }
   if (candidate.stabilize !== undefined && typeof candidate.stabilize !== "function") {
     invalid("stabilize must be a function.");
   }
@@ -243,7 +240,6 @@ function validateConfig(value) {
     },
     viewports,
     cases: validateCases(candidate.cases, viewports),
-    probe: candidate.probe ?? (() => ({})),
     stabilize: candidate.stabilize,
     freezeAnimations: candidate.freezeAnimations !== false,
     screenshot: validateScreenshot(candidate.screenshot),
@@ -267,42 +263,42 @@ async function loadConfig(options) {
       cause: error
     });
   }
-  return { path, config: validateConfig(module.default) };
-}
-
-// src/diff.ts
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-function childPath(parent, key) {
-  if (/^[A-Za-z_$][\w$]*$/.test(key)) {
-    return parent ? `${parent}.${key}` : key;
+  const config = validateConfig(module.default);
+  if (!options.taskPath)
+    return { path, config };
+  const taskPath = isAbsolute(options.taskPath) ? options.taskPath : resolve(options.cwd, options.taskPath);
+  try {
+    await access(taskPath);
+  } catch (error) {
+    throw new ShimonError("task_not_found", `Task config not found: ${taskPath}`, "Create a task module with a default export containing cases, or omit --task.", { cause: error });
   }
-  return `${parent}[${JSON.stringify(key)}]`;
-}
-function visit(before, after, path, changes) {
-  if (Object.is(before, after))
-    return;
-  if (Array.isArray(before) && Array.isArray(after)) {
-    const length = Math.max(before.length, after.length);
-    for (let index = 0;index < length; index += 1) {
-      visit(before[index], after[index], `${path}[${index}]`, changes);
-    }
-    return;
+  let taskModule;
+  try {
+    taskModule = await import(pathToFileURL(taskPath).href);
+  } catch (error) {
+    throw new ShimonError("task_load_failed", `Could not load task config: ${taskPath}`, undefined, {
+      cause: error
+    });
   }
-  if (isRecord(before) && isRecord(after)) {
-    const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort();
-    for (const key of keys) {
-      visit(before[key], after[key], childPath(path, key), changes);
-    }
-    return;
+  if (taskModule.default === null || typeof taskModule.default !== "object") {
+    invalid("The task default export must be an object.", "Check the module passed to --task.");
   }
-  changes.push({ path: path || "$", before, after });
-}
-function diffJson(before, after) {
-  const changes = [];
-  visit(before, after, "", changes);
-  return changes;
+  const task = taskModule.default;
+  const unexpected = Object.keys(task).filter((key) => key !== "cases");
+  if (unexpected.length > 0) {
+    invalid(`Task config only accepts cases; remove: ${unexpected.join(", ")}`, "Move project settings to shimon.config.mjs.");
+  }
+  const taskCases = validateCases(task.cases, config.viewports ?? {});
+  const names = new Set(config.cases.map((testCase) => testCase.name));
+  const duplicate = taskCases.find((testCase) => names.has(testCase.name));
+  if (duplicate) {
+    invalid(`Task case duplicates a project case: ${duplicate.name}`, "Give the task case a unique name.");
+  }
+  return {
+    path,
+    taskPath,
+    config: { ...config, cases: [...config.cases, ...taskCases] }
+  };
 }
 
 // src/url.ts
@@ -338,7 +334,13 @@ function sanitizeDiagnosticText(value) {
   return `${sanitized.slice(0, MAX_DIAGNOSTIC_LENGTH - 1)}…`;
 }
 
-// src/runner.ts
+// src/version.ts
+var TOOL_VERSION = "0.2.0";
+
+// src/verify.ts
+import { createHash, randomUUID as randomUUID2 } from "node:crypto";
+import { mkdir } from "node:fs/promises";
+import { join as join2, resolve as resolve2 } from "node:path";
 import { chromium } from "playwright";
 
 // src/case-runner.ts
@@ -350,28 +352,12 @@ var FREEZE_STYLES = `
     transition: none !important;
   }
 `;
-function asJsonValue(value, path = "probe") {
-  if (value === null || typeof value === "string" || typeof value === "boolean")
-    return value;
-  if (typeof value === "number" && Number.isFinite(value))
-    return value;
-  if (Array.isArray(value))
-    return value.map((child, index) => asJsonValue(child, `${path}[${index}]`));
-  if (value !== null && typeof value === "object") {
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) {
-      throw new ShimonError("probe_invalid", `${path} must be a plain JSON object.`);
-    }
-    return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, asJsonValue(child, `${path}.${key}`)]));
-  }
-  throw new ShimonError("probe_invalid", `${path} is not JSON-serializable.`, "Return only objects, arrays, strings, finite numbers, booleans, or null from probe().");
-}
 async function settle(page) {
   await page.evaluate(() => new Promise((resolve2) => {
     requestAnimationFrame(() => requestAnimationFrame(() => resolve2()));
   }));
 }
-async function runConfiguredCase(page, config, testCase, execute = async (promise) => promise) {
+async function prepareConfiguredCase(page, config, testCase, execute = async (promise) => promise) {
   if (config.freezeAnimations) {
     await execute(page.addStyleTag({ content: FREEZE_STYLES }).then(() => {
       return;
@@ -386,162 +372,7 @@ async function runConfiguredCase(page, config, testCase, execute = async (promis
     await execute(Promise.resolve().then(() => testCase.prepare(page)));
   }
   await execute(settle(page));
-  return asJsonValue(await execute(Promise.resolve().then(() => config.probe(page))), `cases.${testCase.name}.probe`);
 }
-
-// src/version.ts
-var TOOL_VERSION = "0.1.0";
-
-// src/runner.ts
-async function captureFingerprint(config) {
-  if (config.cases.length === 0) {
-    throw new ShimonError("cases_required", "No verification cases are configured.", "Create an agent-authored task config with at least one case and pass --config <path>.");
-  }
-  const browser = await chromium.launch({ headless: true });
-  try {
-    const recordedUrl = publicTargetUrl(config.target.url);
-    const cases = [];
-    let runtime;
-    for (const testCase of config.cases) {
-      const viewport = testCase.viewport ?? config.target.viewport;
-      const caseUrl = testCase.path === undefined ? config.target.url : new URL(testCase.path, config.target.url).toString();
-      const recordedCaseUrl = publicTargetUrl(caseUrl);
-      const context = await browser.newContext({ viewport });
-      try {
-        const page = await context.newPage();
-        let response;
-        try {
-          response = await page.goto(caseUrl, { waitUntil: "load" });
-        } catch (error) {
-          throw new ShimonError("target_navigation_failed", `Could not load target: ${recordedCaseUrl}`, undefined, { cause: error });
-        }
-        if (response && !response.ok()) {
-          throw new ShimonError("target_http_error", `Target returned HTTP ${response.status()}: ${recordedCaseUrl}`);
-        }
-        await page.waitForLoadState("networkidle", { timeout: 1000 }).catch(() => {
-          return;
-        });
-        runtime ??= await page.evaluate(() => ({
-          deviceScaleFactor: window.devicePixelRatio,
-          locale: navigator.language,
-          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
-        }));
-        const probe = await runConfiguredCase(page, config, testCase);
-        cases.push({ name: testCase.name, url: recordedCaseUrl, viewport, probe });
-      } finally {
-        await context.close();
-      }
-    }
-    if (!runtime)
-      throw new ShimonError("cases_required", "No verification cases are configured.");
-    return {
-      schemaVersion: 2,
-      toolVersion: TOOL_VERSION,
-      target: { url: recordedUrl },
-      environment: {
-        browser: "chromium",
-        browserVersion: browser.version(),
-        viewport: config.target.viewport,
-        deviceScaleFactor: runtime.deviceScaleFactor,
-        locale: runtime.locale,
-        timezone: runtime.timezone
-      },
-      cases
-    };
-  } finally {
-    await browser.close();
-  }
-}
-
-// src/store.ts
-import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-
-// src/canonicalize.ts
-function sortValue(value) {
-  if (Array.isArray(value)) {
-    return value.map(sortValue);
-  }
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0).map(([key, child]) => [key, sortValue(child)]));
-  }
-  return value;
-}
-function canonicalStringify(value) {
-  return `${JSON.stringify(sortValue(value))}
-`;
-}
-
-// src/store.ts
-var LABEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-function isRecord2(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-function isViewport(value) {
-  if (!isRecord2(value))
-    return false;
-  return Number.isInteger(value.width) && value.width > 0 && Number.isInteger(value.height) && value.height > 0;
-}
-function isFingerprintArtifact(value) {
-  if (!isRecord2(value.target) || typeof value.target.url !== "string")
-    return false;
-  if (!isRecord2(value.environment))
-    return false;
-  const environment = value.environment;
-  if (typeof environment.browser !== "string" || typeof environment.browserVersion !== "string" || !isViewport(environment.viewport) || typeof environment.deviceScaleFactor !== "number" || !Number.isFinite(environment.deviceScaleFactor) || typeof environment.locale !== "string" || typeof environment.timezone !== "string") {
-    return false;
-  }
-  if (!Array.isArray(value.cases))
-    return false;
-  return value.cases.every((testCase) => isRecord2(testCase) && typeof testCase.name === "string" && isViewport(testCase.viewport) && Object.hasOwn(testCase, "probe"));
-}
-function artifactPath(root, label) {
-  if (!LABEL_PATTERN.test(label) || label === "." || label === "..") {
-    throw new Error(`Invalid label ${JSON.stringify(label)}; use 1-128 letters, numbers, dots, dashes, or underscores.`);
-  }
-  return join(root, `${label}.json`);
-}
-async function writeArtifact(root, label, artifact) {
-  const destination = artifactPath(root, label);
-  await mkdir(root, { recursive: true });
-  const temporary = join(root, `.${label}.${randomUUID()}.tmp`);
-  try {
-    await writeFile(temporary, canonicalStringify(artifact), { encoding: "utf8", flag: "wx" });
-    await rename(temporary, destination);
-  } finally {
-    await rm(temporary, { force: true });
-  }
-  return destination;
-}
-async function readArtifact(root, label) {
-  const source = artifactPath(root, label);
-  let artifact;
-  try {
-    artifact = JSON.parse(await readFile(source, "utf8"));
-  } catch (error) {
-    throw new ShimonError("artifact_invalid", `Could not read artifact: ${source}`, undefined, {
-      cause: error
-    });
-  }
-  if (artifact === null || typeof artifact !== "object" || Array.isArray(artifact)) {
-    throw new ShimonError("artifact_invalid", `Artifact must be a JSON object: ${source}`);
-  }
-  const value = artifact;
-  if (value.schemaVersion !== 2) {
-    throw new ShimonError("artifact_incompatible", `Artifact schema ${String(value.schemaVersion)} is not supported: ${source}`, "Capture a fresh artifact with this shimon version.");
-  }
-  if (typeof value.toolVersion !== "string" || !isFingerprintArtifact(value)) {
-    throw new ShimonError("artifact_invalid", `Artifact is missing required fields: ${source}`);
-  }
-  return artifact;
-}
-
-// src/verify.ts
-import { createHash, randomUUID as randomUUID3 } from "node:crypto";
-import { mkdir as mkdir2 } from "node:fs/promises";
-import { join as join3, resolve as resolve2 } from "node:path";
-import { chromium as chromium2 } from "playwright";
 
 // src/checks.ts
 import { createRequire } from "node:module";
@@ -633,30 +464,48 @@ async function runPageChecks(page, failures) {
 }
 
 // src/evidence.ts
-import { randomUUID as randomUUID2 } from "node:crypto";
-import { readdir, rename as rename2, rm as rm2, stat, writeFile as writeFile2 } from "node:fs/promises";
-import { join as join2 } from "node:path";
+import { randomUUID } from "node:crypto";
+import { readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 async function writeJsonAtomic(path, value) {
-  const temporary = `${path}.${randomUUID2()}.tmp`;
+  const temporary = `${path}.${randomUUID()}.tmp`;
   try {
-    await writeFile2(temporary, `${JSON.stringify(value)}
+    await writeFile(temporary, `${JSON.stringify(value)}
 `, { encoding: "utf8", flag: "wx" });
-    await rename2(temporary, path);
+    await rename(temporary, path);
   } finally {
-    await rm2(temporary, { force: true });
+    await rm(temporary, { force: true });
   }
 }
 async function pruneRunDirectories(root, keep) {
-  const runs = join2(root, "runs");
+  const runs = join(root, "runs");
   const entries = await readdir(runs, { withFileTypes: true }).catch(() => []);
   const directories = await Promise.all(entries.filter((entry) => entry.isDirectory()).map(async (entry) => {
-    const path = join2(runs, entry.name);
+    const path = join(runs, entry.name);
     return { path, mtimeMs: (await stat(path)).mtimeMs };
   }));
   directories.sort((left, right) => left.mtimeMs - right.mtimeMs || left.path.localeCompare(right.path));
   const removed = directories.slice(0, Math.max(0, directories.length - keep)).map((entry) => entry.path);
-  await Promise.all(removed.map((path) => rm2(path, { recursive: true, force: true })));
+  await Promise.all(removed.map((path) => rm(path, { recursive: true, force: true })));
   return removed;
+}
+
+// src/json.ts
+function asJsonValue(value, path = "evidence") {
+  if (value === null || typeof value === "string" || typeof value === "boolean")
+    return value;
+  if (typeof value === "number" && Number.isFinite(value))
+    return value;
+  if (Array.isArray(value))
+    return value.map((child, index) => asJsonValue(child, `${path}[${index}]`));
+  if (value !== null && typeof value === "object") {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new ShimonError("evidence_invalid", `${path} must be a plain JSON object.`);
+    }
+    return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, asJsonValue(child, `${path}.${key}`)]));
+  }
+  throw new ShimonError("evidence_invalid", `${path} is not JSON-serializable.`, "Return only objects, arrays, strings, finite numbers, booleans, or null from check evidence.");
 }
 
 // src/project-checks.ts
@@ -809,7 +658,7 @@ async function beforeDeadline(promise, deadline, code, message) {
 }
 async function verifyProject(config, options) {
   if (config.cases.length === 0) {
-    throw new ShimonError("cases_required", "No verification cases are configured.", "Create an agent-authored task config with at least one case and pass --config <path>.");
+    throw new ShimonError("cases_required", "No verification cases are configured.", "Create an agent-authored task config with at least one case and pass --task <path>.");
   }
   const startedAt = Date.now();
   const runDeadline = startedAt + (config.timeouts?.runMs ?? 120000);
@@ -819,11 +668,11 @@ async function verifyProject(config, options) {
   if (unknownCase) {
     throw new ShimonError("case_not_found", `Unknown case: ${unknownCase}`, `Available cases: ${config.cases.map((testCase) => testCase.name).join(", ")}`);
   }
-  const runId = randomUUID3();
+  const runId = randomUUID2();
   const root = resolve2(options.root);
-  const runDirectory = join3(root, "runs", runId);
-  const screenshotDirectory = join3(runDirectory, "screenshots");
-  await mkdir2(screenshotDirectory, { recursive: true });
+  const runDirectory = join2(root, "runs", runId);
+  const screenshotDirectory = join2(runDirectory, "screenshots");
+  await mkdir(screenshotDirectory, { recursive: true });
   const selected = requestedCases.length ? config.cases.filter((testCase) => requestedCases.includes(testCase.name)) : config.cases;
   let webServer;
   if (config.webServer) {
@@ -847,9 +696,9 @@ async function verifyProject(config, options) {
     }
   }
   const cases = [];
-  const reproduce = (caseName) => `shimon verify --case ${caseName}${options.configPath ? ` --config ${JSON.stringify(options.configPath)}` : ""} --json`;
+  const reproduce = (caseName) => `shimon verify --case ${caseName}${options.configPath ? ` --config ${JSON.stringify(options.configPath)}` : ""}${options.taskPath ? ` --task ${JSON.stringify(options.taskPath)}` : ""} --json`;
   try {
-    const browser = await beforeDeadline(chromium2.launch({ headless: true }), runDeadline, "run_timeout", "Verification run timed out while launching Chromium.");
+    const browser = await beforeDeadline(chromium.launch({ headless: true }), runDeadline, "run_timeout", "Verification run timed out while launching Chromium.");
     try {
       for (const [caseIndex, testCase] of selected.entries()) {
         const caseBudgetDeadline = Date.now() + (config.timeouts?.caseMs ?? 20000);
@@ -860,7 +709,7 @@ async function verifyProject(config, options) {
         const caseUrl = testCase.path === undefined ? config.target.url : new URL(testCase.path, config.target.url).toString();
         const recordedCaseUrl = publicTargetUrl(caseUrl);
         const context = await beforeDeadline(browser.newContext({ viewport }), runDeadline, "run_timeout", `Verification run timed out while creating context for case: ${testCase.name}`);
-        const screenshot = join3(screenshotDirectory, caseFilename(caseIndex, testCase.name));
+        const screenshot = join2(screenshotDirectory, caseFilename(caseIndex, testCase.name));
         try {
           const page = await context.newPage();
           page.setDefaultTimeout(config.timeouts?.caseMs ?? 20000);
@@ -873,7 +722,7 @@ async function verifyProject(config, options) {
             await withinCase(page.waitForLoadState("networkidle", { timeout: 1000 }).catch(() => {
               return;
             }));
-            const probe = await runConfiguredCase(page, config, testCase, withinCase);
+            await prepareConfiguredCase(page, config, testCase, withinCase);
             await withinCase(page.screenshot({
               path: screenshot,
               fullPage: false,
@@ -893,7 +742,6 @@ async function verifyProject(config, options) {
               viewportName: testCase.viewportName ?? null,
               intent: testCase.intent ?? null,
               review: testCase.review ?? [],
-              probe,
               checks,
               evidence: { screenshot },
               reproduce: reproduce(testCase.name)
@@ -918,7 +766,6 @@ async function verifyProject(config, options) {
               viewportName: testCase.viewportName ?? null,
               intent: testCase.intent ?? null,
               review: testCase.review ?? [],
-              probe: null,
               checks: null,
               evidence: { screenshot: evidence },
               reproduce: reproduce(testCase.name),
@@ -940,11 +787,12 @@ async function verifyProject(config, options) {
     await webServer?.close();
   }
   const passed = cases.filter((testCase) => testCase.pass).length;
-  const manifest = join3(runDirectory, "manifest.json");
+  const manifest = join2(runDirectory, "manifest.json");
   const result = {
     schemaVersion: 1,
     success: true,
     pass: passed === cases.length,
+    visualReviewRequired: cases.some((testCase) => testCase.evidence.screenshot !== null),
     command: "verify",
     run: {
       id: runId,
@@ -958,7 +806,7 @@ async function verifyProject(config, options) {
     manifest
   };
   await writeJsonAtomic(manifest, result);
-  await writeJsonAtomic(join3(root, "latest.json"), { runId, manifest });
+  await writeJsonAtomic(join2(root, "latest.json"), { runId, manifest });
   await pruneRunDirectories(root, 3);
   return result;
 }
@@ -967,19 +815,17 @@ async function verifyProject(config, options) {
 var HELP = `shimon ${TOOL_VERSION}
 
 Usage:
-  shimon selftest [--config <path>] [--json]
-  shimon verify [--case <name>] [--config <path>] [--json]
-  shimon capture <label> [--config <path>] [--json]
-  shimon diff <before> <after> [--json]
+  shimon verify [--case <name>] [--config <path>] [--task <path>] [--json]
 `;
 function usage(message) {
   throw new ShimonError("usage_error", message, "Run shimon --help for usage.");
 }
 function parseCliArgs(argv) {
   const positionals = [];
+  const caseNames = [];
   let json = false;
   let configPath;
-  const caseNames = [];
+  let taskPath;
   for (let index = 0;index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--json") {
@@ -1004,6 +850,15 @@ function parseCliArgs(argv) {
       configPath = argument.slice("--config=".length);
       if (!configPath)
         usage("--config requires a path.");
+    } else if (argument === "--task") {
+      taskPath = argv[index + 1];
+      if (!taskPath || taskPath.startsWith("--"))
+        usage("--task requires a path.");
+      index += 1;
+    } else if (argument.startsWith("--task=")) {
+      taskPath = argument.slice("--task=".length);
+      if (!taskPath)
+        usage("--task requires a path.");
     } else if (argument === "--help" || argument === "-h") {
       positionals.push("help");
     } else if (argument === "--version" || argument === "-v") {
@@ -1015,20 +870,14 @@ function parseCliArgs(argv) {
     }
   }
   const command = positionals.shift() ?? "help";
-  if (!["capture", "diff", "help", "selftest", "verify", "version"].includes(command)) {
+  if (!["help", "verify", "version"].includes(command))
     usage(`Unknown command: ${command}`);
-  }
-  const required = command === "capture" ? 1 : command === "diff" ? 2 : 0;
-  if (positionals.length !== required) {
-    if (command === "capture")
-      usage("capture requires one label.");
-    if (command === "diff")
-      usage("diff requires two labels.");
+  if (positionals.length > 0)
     usage(`${command} does not accept labels.`);
+  if (command !== "verify" && (caseNames.length > 0 || configPath || taskPath)) {
+    usage("--case, --config, and --task are only valid with verify.");
   }
-  if (caseNames.length > 0 && command !== "verify")
-    usage("--case is only valid with verify.");
-  return { command, labels: positionals, caseNames, json, configPath };
+  return { command, caseNames, json, configPath, taskPath };
 }
 function emit(value, json, human) {
   process.stdout.write(json ? `${JSON.stringify(value)}
@@ -1050,42 +899,23 @@ async function run(args, cwd) {
     return 0;
   }
   const root = resolve3(cwd, ".shimon");
-  if (args.command === "diff") {
-    const [beforeLabel, afterLabel] = args.labels;
-    const before = await readArtifact(root, beforeLabel);
-    const after = await readArtifact(root, afterLabel);
-    const changes2 = diffJson(before, after);
-    const identical = changes2.length === 0;
-    emit({ ok: identical, command: "diff", before: beforeLabel, after: afterLabel, changes: changes2 }, args.json, identical ? `${beforeLabel} and ${afterLabel} are identical` : `${beforeLabel} and ${afterLabel} differ at ${changes2.length} path(s)`);
-    return identical ? 0 : 1;
-  }
-  const loaded = await loadConfig({ cwd, configPath: args.configPath });
-  if (args.command === "verify") {
-    progress(`verifying ${publicTargetUrl(loaded.config.target.url)}`);
-    const result = await verifyProject(loaded.config, {
-      root,
-      caseNames: args.caseNames,
-      cwd,
-      configPath: args.configPath
-    });
-    emit(result, args.json, result.pass ? "verification passed" : "verification failed");
-    return result.pass ? 0 : 1;
-  }
-  if (args.command === "capture") {
-    const label = args.labels[0];
-    progress(`capturing ${label} from ${publicTargetUrl(loaded.config.target.url)}`);
-    const artifact = await captureFingerprint(loaded.config);
-    const path = await writeArtifact(root, label, artifact);
-    emit({ ok: true, command: "capture", label, path, cases: artifact.cases.length }, args.json, `captured ${label} -> ${path}`);
-    return 0;
-  }
-  progress(`capturing two fresh runs from ${publicTargetUrl(loaded.config.target.url)}`);
-  const first = await captureFingerprint(loaded.config);
-  const second = await captureFingerprint(loaded.config);
-  const changes = diffJson(first, second);
-  const stable = changes.length === 0;
-  emit({ ok: stable, command: "selftest", changes }, args.json, stable ? "selftest passed: two fresh captures are identical" : `selftest failed at ${changes.length} path(s)`);
-  return stable ? 0 : 1;
+  const loaded = await loadConfig({
+    cwd,
+    configPath: args.configPath,
+    taskPath: args.taskPath
+  });
+  progress(`verifying ${publicTargetUrl(loaded.config.target.url)}`);
+  const result = await verifyProject(loaded.config, {
+    root,
+    caseNames: args.caseNames,
+    cwd,
+    configPath: args.configPath,
+    taskPath: args.taskPath
+  });
+  const screenshotCount = result.cases.filter((testCase) => testCase.evidence.screenshot).length;
+  const human = !result.pass ? "verification failed" : result.visualReviewRequired ? `automated checks passed; inspect ${screenshotCount} screenshot${screenshotCount === 1 ? "" : "s"}` : "automated checks passed";
+  emit(result, args.json, human);
+  return result.pass ? 0 : 1;
 }
 async function main(argv = process.argv.slice(2), cwd = process.cwd()) {
   let json = argv.includes("--json");

@@ -4,12 +4,11 @@ import { join, resolve } from "node:path";
 
 import { chromium } from "playwright";
 
-import { runConfiguredCase } from "./case-runner.ts";
+import { prepareConfiguredCase } from "./case-runner.ts";
 import { collectPageFailures, runPageChecks, type PageChecks } from "./checks.ts";
 import { sanitizeDiagnosticText } from "./diagnostics.ts";
 import { operationalError, ShimonError } from "./errors.ts";
 import { pruneRunDirectories, writeJsonAtomic } from "./evidence.ts";
-import type { JsonValue } from "./canonicalize.ts";
 import { runProjectChecks } from "./project-checks.ts";
 import type { ProjectCheckResult, ShimonConfig, Viewport } from "./types.ts";
 import { publicTargetUrl } from "./url.ts";
@@ -24,7 +23,6 @@ export interface VerifyCaseResult {
   viewportName: string | null;
   intent: string | null;
   review: string[];
-  probe: JsonValue | null;
   checks: (PageChecks & { project: ProjectCheckResult[] }) | null;
   evidence: { screenshot: string | null };
   reproduce: string;
@@ -35,6 +33,7 @@ export interface VerifyResult {
   schemaVersion: 1;
   success: true;
   pass: boolean;
+  visualReviewRequired: boolean;
   command: "verify";
   run: {
     id: string;
@@ -99,13 +98,19 @@ async function beforeDeadline<T>(
 
 export async function verifyProject(
   config: ShimonConfig,
-  options: { root: string; caseNames?: string[]; cwd?: string; configPath?: string },
+  options: {
+    root: string;
+    caseNames?: string[];
+    cwd?: string;
+    configPath?: string;
+    taskPath?: string;
+  },
 ): Promise<VerifyResult> {
   if (config.cases.length === 0) {
     throw new ShimonError(
       "cases_required",
       "No verification cases are configured.",
-      "Create an agent-authored task config with at least one case and pass --config <path>.",
+      "Create an agent-authored task config with at least one case and pass --task <path>.",
     );
   }
   const startedAt = Date.now();
@@ -153,7 +158,7 @@ export async function verifyProject(
   const reproduce = (caseName: string): string =>
     `shimon verify --case ${caseName}${
       options.configPath ? ` --config ${JSON.stringify(options.configPath)}` : ""
-    } --json`;
+    }${options.taskPath ? ` --task ${JSON.stringify(options.taskPath)}` : ""} --json`;
 
   try {
     const browser = await beforeDeadline(
@@ -203,7 +208,7 @@ export async function verifyProject(
             await withinCase(
               page.waitForLoadState("networkidle", { timeout: 1_000 }).catch(() => undefined),
             );
-            const probe = await runConfiguredCase(page, config, testCase, withinCase);
+            await prepareConfiguredCase(page, config, testCase, withinCase);
             await withinCase(
               page.screenshot({
                 path: screenshot,
@@ -227,7 +232,6 @@ export async function verifyProject(
               viewportName: testCase.viewportName ?? null,
               intent: testCase.intent ?? null,
               review: testCase.review ?? [],
-              probe,
               checks,
               evidence: { screenshot },
               reproduce: reproduce(testCase.name),
@@ -254,7 +258,6 @@ export async function verifyProject(
               viewportName: testCase.viewportName ?? null,
               intent: testCase.intent ?? null,
               review: testCase.review ?? [],
-              probe: null,
               checks: null,
               evidence: { screenshot: evidence },
               reproduce: reproduce(testCase.name),
@@ -282,6 +285,7 @@ export async function verifyProject(
     schemaVersion: 1,
     success: true,
     pass: passed === cases.length,
+    visualReviewRequired: cases.some((testCase) => testCase.evidence.screenshot !== null),
     command: "verify",
     run: {
       id: runId,

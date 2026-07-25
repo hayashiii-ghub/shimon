@@ -1,9 +1,0 @@
-node_modules/
-.shimon/
-*.tgz
-src/
-tests/
-bun.lock
-tsconfig.json
-!dist/
-!dist/cli.js
