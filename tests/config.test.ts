@@ -20,7 +20,6 @@ describe("loadConfig", () => {
       `export default {
         target: { url: "http://127.0.0.1:4322/" },
         cases: [{ name: "start" }],
-        probe: async () => ({ ok: true }),
       };`,
     );
 
@@ -30,7 +29,7 @@ describe("loadConfig", () => {
     expect(loaded.config.target.viewport).toEqual({ width: 1200, height: 900 });
   });
 
-  test("loads a project-owned skeleton without cases or a probe", async () => {
+  test("loads a project-owned skeleton without cases", async () => {
     const root = await mkdtemp(join(tmpdir(), "shimon-config-"));
     roots.push(root);
     await writeFile(
@@ -48,7 +47,6 @@ describe("loadConfig", () => {
     const loaded = await loadConfig({ cwd: root });
 
     expect(loaded.config.cases).toEqual([]);
-    expect(await loaded.config.probe({} as never)).toEqual({});
   });
 
   test("resolves named viewports and preserves agent-authored case metadata", async () => {
@@ -70,7 +68,6 @@ describe("loadConfig", () => {
           intent: "Verify the pricing cards stack without hiding the CTA.",
           review: ["Cards are readable", "CTA remains visually prominent"],
         }],
-        probe: async () => ({}),
       };`,
     );
 
@@ -100,7 +97,6 @@ describe("loadConfig", () => {
         target: { url: "http://127.0.0.1:4322/" },
         viewports: { mobile: { width: 390, height: 844 } },
         cases: [{ name: "start", viewport: "tablet" }],
-        probe: async () => ({}),
       };`,
     );
 
@@ -139,7 +135,6 @@ describe("loadConfig", () => {
             { id: "cta-visible", description: "Duplicate", evaluate: async () => true },
           ],
         }],
-        probe: async () => ({}),
       };`,
     );
 
@@ -154,7 +149,6 @@ describe("loadConfig", () => {
       `export default {
         target: { url: "http://127.0.0.1:4322/" },
         cases: [{ name: "same" }, { name: "same" }],
-        probe: async () => ({}),
       };`,
     );
 
@@ -171,7 +165,6 @@ describe("loadConfig", () => {
         webServer: { command: "bun run dev", url: "http://127.0.0.1:4322/" },
         timeouts: { runMs: 90000, caseMs: 15000, navigationMs: 5000 },
         cases: [{ name: "start" }],
-        probe: async () => ({}),
       };`,
     );
 
@@ -188,5 +181,61 @@ describe("loadConfig", () => {
       caseMs: 15_000,
       navigationMs: 5_000,
     });
+  });
+
+  test("adds task cases without replacing project cases", async () => {
+    const root = await mkdtemp(join(tmpdir(), "shimon-config-"));
+    roots.push(root);
+    await writeFile(
+      join(root, "shimon.config.mjs"),
+      `export default {
+        target: { url: "http://127.0.0.1:4322/" },
+        viewports: { mobile: { width: 390, height: 844 } },
+        cases: [{ name: "home" }],
+      };`,
+    );
+    await writeFile(
+      join(root, "task.mjs"),
+      `export default {
+        cases: [{ name: "menu-mobile", viewport: "mobile", review: ["Menu is readable"] }],
+      };`,
+    );
+
+    const loaded = await loadConfig({ cwd: root, taskPath: "task.mjs" });
+
+    expect(loaded.taskPath).toBe(join(root, "task.mjs"));
+    expect(loaded.config.cases).toMatchObject([
+      { name: "home" },
+      {
+        name: "menu-mobile",
+        viewport: { width: 390, height: 844 },
+        viewportName: "mobile",
+        review: ["Menu is readable"],
+      },
+    ]);
+  });
+
+  test("rejects task settings and duplicate project cases", async () => {
+    const root = await mkdtemp(join(tmpdir(), "shimon-config-"));
+    roots.push(root);
+    await writeFile(
+      join(root, "shimon.config.mjs"),
+      `export default {
+        target: { url: "http://127.0.0.1:4322/" },
+        cases: [{ name: "home" }],
+      };`,
+    );
+    await writeFile(
+      join(root, "settings.mjs"),
+      `export default { cases: [{ name: "other" }], target: { url: "https://example.com" } };`,
+    );
+    await expect(loadConfig({ cwd: root, taskPath: "settings.mjs" })).rejects.toThrow(
+      "Task config only accepts cases",
+    );
+
+    await writeFile(join(root, "duplicate.mjs"), `export default { cases: [{ name: "home" }] };`);
+    await expect(loadConfig({ cwd: root, taskPath: "duplicate.mjs" })).rejects.toThrow(
+      "Task case duplicates a project case: home",
+    );
   });
 });

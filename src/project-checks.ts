@@ -1,6 +1,6 @@
 import type { Page } from "playwright";
 
-import { asJsonValue } from "./case-runner.ts";
+import { asJsonValue } from "./json.ts";
 import { ShimonError } from "./errors.ts";
 import type { ProjectCheck, ProjectCheckResult } from "./types.ts";
 

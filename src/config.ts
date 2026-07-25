@@ -9,8 +9,8 @@ const DEFAULT_CONFIG = "shimon.config.mjs";
 const DEFAULT_VIEWPORT: Viewport = { width: 1200, height: 900 };
 const DEFAULT_TIMEOUTS = { runMs: 120_000, caseMs: 20_000, navigationMs: 10_000 };
 
-function invalid(message: string): never {
-  throw new ShimonError("config_invalid", message, "Check shimon.config.mjs.");
+function invalid(message: string, hint = "Check shimon.config.mjs."): never {
+  throw new ShimonError("config_invalid", message, hint);
 }
 
 function validateViewport(value: unknown, path = "target.viewport"): Viewport {
@@ -201,9 +201,6 @@ function validateConfig(value: unknown): ShimonConfig {
   } catch {
     invalid("target.url must be an absolute URL.");
   }
-  if (candidate.probe !== undefined && typeof candidate.probe !== "function") {
-    invalid("probe must be a function.");
-  }
   if (candidate.stabilize !== undefined && typeof candidate.stabilize !== "function") {
     invalid("stabilize must be a function.");
   }
@@ -219,7 +216,6 @@ function validateConfig(value: unknown): ShimonConfig {
     },
     viewports,
     cases: validateCases(candidate.cases, viewports),
-    probe: (candidate.probe ?? (() => ({}))) as ShimonConfig["probe"],
     stabilize: candidate.stabilize as ShimonConfig["stabilize"],
     freezeAnimations: candidate.freezeAnimations !== false,
     screenshot: validateScreenshot(candidate.screenshot),
@@ -231,6 +227,7 @@ function validateConfig(value: unknown): ShimonConfig {
 export async function loadConfig(options: {
   cwd: string;
   configPath?: string;
+  taskPath?: string;
 }): Promise<LoadedConfig> {
   const requested = options.configPath ?? DEFAULT_CONFIG;
   const path = isAbsolute(requested) ? requested : resolve(options.cwd, requested);
@@ -255,5 +252,52 @@ export async function loadConfig(options: {
     });
   }
 
-  return { path, config: validateConfig(module.default) };
+  const config = validateConfig(module.default);
+  if (!options.taskPath) return { path, config };
+
+  const taskPath = isAbsolute(options.taskPath)
+    ? options.taskPath
+    : resolve(options.cwd, options.taskPath);
+  try {
+    await access(taskPath);
+  } catch (error) {
+    throw new ShimonError(
+      "task_not_found",
+      `Task config not found: ${taskPath}`,
+      "Create a task module with a default export containing cases, or omit --task.",
+      { cause: error },
+    );
+  }
+
+  let taskModule: { default?: unknown };
+  try {
+    taskModule = (await import(pathToFileURL(taskPath).href)) as { default?: unknown };
+  } catch (error) {
+    throw new ShimonError("task_load_failed", `Could not load task config: ${taskPath}`, undefined, {
+      cause: error,
+    });
+  }
+  if (taskModule.default === null || typeof taskModule.default !== "object") {
+    invalid("The task default export must be an object.", "Check the module passed to --task.");
+  }
+  const task = taskModule.default as Record<string, unknown>;
+  const unexpected = Object.keys(task).filter((key) => key !== "cases");
+  if (unexpected.length > 0) {
+    invalid(
+      `Task config only accepts cases; remove: ${unexpected.join(", ")}`,
+      "Move project settings to shimon.config.mjs.",
+    );
+  }
+  const taskCases = validateCases(task.cases, config.viewports ?? {});
+  const names = new Set(config.cases.map((testCase) => testCase.name));
+  const duplicate = taskCases.find((testCase) => names.has(testCase.name));
+  if (duplicate) {
+    invalid(`Task case duplicates a project case: ${duplicate.name}`, "Give the task case a unique name.");
+  }
+
+  return {
+    path,
+    taskPath,
+    config: { ...config, cases: [...config.cases, ...taskCases] },
+  };
 }

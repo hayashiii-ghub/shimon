@@ -21,7 +21,6 @@ describe("verifyProject", () => {
       target: { url: "http://127.0.0.1:4322/", viewport: { width: 320, height: 240 } },
       freezeAnimations: true,
       cases: [],
-      probe: () => ({}),
     };
 
     await expect(verifyProject(config, { root })).rejects.toMatchObject({
@@ -74,17 +73,18 @@ describe("verifyProject", () => {
           ],
         },
       ],
-      probe: (page) => page.evaluate(() => ({ path: location.pathname, width: innerWidth })),
     };
 
     try {
       const result = await verifyProject(config, {
         root,
-        configPath: ".shimon/task.config.mjs",
+        configPath: "shimon.config.mjs",
+        taskPath: ".shimon/task.mjs",
       });
       const verifiedCase = result.cases[0];
 
       expect(result.pass).toBeFalse();
+      expect(result.visualReviewRequired).toBeTrue();
       expect(verifiedCase).toMatchObject({
         name: "pricing-mobile",
         url: `http://127.0.0.1:${server.port}/pricing`,
@@ -92,9 +92,8 @@ describe("verifyProject", () => {
         viewportName: "mobile",
         intent: "Verify the mobile pricing CTA.",
         review: ["Pricing hierarchy is clear", "CTA is visually prominent"],
-        probe: { path: "/pricing", width: 390 },
         reproduce:
-          'shimon verify --case pricing-mobile --config ".shimon/task.config.mjs" --json',
+          'shimon verify --case pricing-mobile --config "shimon.config.mjs" --task ".shimon/task.mjs" --json',
       });
       expect(verifiedCase.checks?.project).toEqual([
         {
@@ -136,7 +135,6 @@ describe("verifyProject", () => {
       },
       freezeAnimations: true,
       cases: [{ name: "managed" }],
-      probe: () => ({ ready: true }),
     };
 
     const result = await verifyProject(config, { root, cwd: root });
@@ -153,7 +151,6 @@ describe("verifyProject", () => {
       target: { url: "data:text/html,<h1>hello</h1>", viewport: { width: 320, height: 240 } },
       freezeAnimations: true,
       cases: [{ name: "home" }],
-      probe: () => ({}),
     };
 
     await expect(verifyProject(config, { root, caseNames: ["missing"] })).rejects.toMatchObject({
@@ -181,7 +178,6 @@ describe("verifyProject", () => {
         },
         { name: "ready" },
       ],
-      probe: () => ({ ready: true }),
     };
 
     const result = await verifyProject(config, { root });
@@ -211,7 +207,6 @@ describe("verifyProject", () => {
       timeouts: { runMs: 1_000, caseMs: 100, navigationMs: 500 },
       freezeAnimations: true,
       cases: [{ name: "hanging", prepare: () => new Promise<void>(() => undefined) }],
-      probe: () => ({}),
     };
 
     const startedAt = Date.now();
@@ -236,7 +231,6 @@ describe("verifyProject", () => {
       timeouts: { runMs: 500, caseMs: 5_000, navigationMs: 500 },
       freezeAnimations: true,
       cases: [{ name: "hanging", prepare: () => new Promise<void>(() => undefined) }],
-      probe: () => ({}),
     };
 
     await expect(verifyProject(config, { root })).rejects.toMatchObject({ code: "run_timeout" });
@@ -261,7 +255,6 @@ describe("verifyProject", () => {
       timeouts: { runMs: 150, caseMs: 5_000, navigationMs: 500 },
       freezeAnimations: true,
       cases: [{ name: "home" }],
-      probe: () => ({}),
     };
 
     const startedAt = Date.now();
@@ -271,7 +264,7 @@ describe("verifyProject", () => {
     expect(Date.now() - startedAt).toBeLessThan(750);
   }, 2_000);
 
-  test("returns a clean case with checks, probe, and screenshot evidence", async () => {
+  test("returns a clean case with checks and screenshot evidence", async () => {
     const server = Bun.serve({
       port: 0,
       fetch: () =>
@@ -286,7 +279,6 @@ describe("verifyProject", () => {
       target: { url: `http://127.0.0.1:${server.port}/`, viewport: { width: 640, height: 480 } },
       freezeAnimations: true,
       cases: [{ name: "home" }],
-      probe: (page) => page.evaluate(() => ({ heading: document.querySelector("h1")?.textContent ?? null })),
     };
 
     try {
@@ -295,8 +287,8 @@ describe("verifyProject", () => {
 
       expect(result.success).toBeTrue();
       expect(result.pass).toBeTrue();
+      expect(result.visualReviewRequired).toBeTrue();
       expect(result.summary).toEqual({ total: 1, passed: 1, failed: 0 });
-      expect(verifiedCase.probe).toEqual({ heading: "Hello" });
       expect(verifiedCase.checks?.overflow.pass).toBeTrue();
       expect(verifiedCase.checks?.consoleErrors.pass).toBeTrue();
       expect(verifiedCase.checks?.failedRequests.pass).toBeTrue();
@@ -334,7 +326,6 @@ describe("verifyProject", () => {
       target: { url: `http://127.0.0.1:${server.port}/`, viewport: { width: 390, height: 844 } },
       freezeAnimations: true,
       cases: [{ name: "bad" }],
-      probe: () => ({ state: "bad" }),
     };
 
     try {
@@ -378,8 +369,6 @@ describe("verifyProject", () => {
       freezeAnimations: true,
       screenshot: { mask: ["#secret"] },
       cases: [{ name: "masked" }],
-      probe: (page) =>
-        page.evaluate(() => ({ secret: document.querySelector("#secret")?.textContent ?? null })),
     };
 
     try {
@@ -403,7 +392,6 @@ describe("verifyProject", () => {
       } finally {
         await browser.close();
       }
-      expect(result.cases[0].probe).toEqual({ secret: "secret" });
     } finally {
       server.stop(true);
     }

@@ -1,64 +1,37 @@
 ---
 name: shimon
-description: Derive task-specific UI cases from a code change, run them at project-approved responsive widths, and inspect agent-readable evidence.
+description: UI・レイアウト・操作の変更を、プロジェクト固有のケースとスクリーンショットで確認する。
 ---
 
-# shimon
+# Shimon
 
-Use shimon when a trusted repository includes `shimon.config.mjs` and a UI,
-layout, or interaction change needs visual verification. The repository may
-define only an execution skeleton; author the task cases yourself.
+信頼できるリポジトリに`shimon.config.mjs`があり、UI・レイアウト・操作を変更したときに使う。
 
-## Author the cases
+## 確認ケースを作る
 
-Before running shimon:
+1. 依頼、差分、変更した画面とコンポーネントを確認する
+2. `.shimon/task.mjs`へ、変更に関係する2〜5個のケースを書く
+3. 主な画面幅を使い、構造が変わる場合だけモバイルも加える
+4. メニュー、ダイアログ、タブなどは`prepare(page)`で対象状態を作る
+5. 機械で決められる条件は`checks`、画像を見て判断する観点は`review`へ書く
 
-1. Read the task, diff, affected routes, and changed components.
-2. Reuse all durable cases already present in `shimon.config.mjs`.
-3. Create `.shimon/task.config.mjs` importing `../shimon.config.mjs`.
-4. Add 2-5 minimal cases covering the affected route, state, and meaningful
-   responsive widths. Avoid a full route-by-viewport matrix.
-5. Put deterministic facts in `checks` or `probe`. Put visual questions that
-   require judgment in `review`.
+全ルートと全画面幅の組み合わせは作らない。プロジェクト側で維持する恒久ケースは、タスクファイルへ複製しない。
 
-Use the affected primary width. Add `mobile` for structural layout changes. Add
-`tablet` only when an intermediate breakpoint, grid transition, navigation, or
-touch layout is plausibly at risk. Use `prepare(page)` for menus, dialogs, tabs,
-expanded sections, validation states, or other interaction states introduced or
-changed by the task.
+## 実行して確認する
 
-Each case should have a stable `name`, project-relative `path`, named `viewport`,
-one-sentence `intent`, and concrete `review` items. Checks should report compact
-JSON evidence that helps diagnose failure. Never place credentials, tokens,
-personal data, or session state in check evidence or probes.
+リポジトリに所定のコマンドがあればそれを使い、なければ次を実行する。
 
-## Development loop
+```sh
+npx shimon verify --task .shimon/task.mjs --json
+```
 
-1. Run the repository's `ui:verify` script when it covers the task config;
-   otherwise run `shimon verify --config .shimon/task.config.mjs --json`.
-2. Treat exit code `1` as an observed UI or case failure and exit code `2` as a
-   broken invocation, config, server, or browser run.
-3. Read every screenshot path returned by the JSON and inspect the image against
-   that case's `intent` and every `review` item.
-4. Check overflow, console errors, failed requests, and a11y before reporting
-   the UI step complete.
-5. After a fix, run the failed case's returned `reproduce` command. Run the full
-   verify command once focused cases pass.
+1. `pass`、overflow、console error、failed request、アクセシビリティ、プロジェクト検査を確認する
+2. 返された全スクリーンショットを開き、`intent`と`review`の各項目を判断する
+3. 失敗ケースを`--case <name>`で再実行し、最後に全ケースを1回通す
+4. 作業後に`.shimon/task.mjs`を削除する
 
-The configured web server is started and stopped automatically when necessary.
-Do not start a second server when `run.webServer.reused` is true.
+`visualReviewRequired: true`は自動検査が通っても画像確認が残っていることを示す。Shimon自身がデザインを採点したとは扱わない。
 
-## Fingerprint comparison
+## 安全
 
-Use `selftest`, `capture`, and `diff` when the task requires comparison with a
-stored project-defined fingerprint. Do not infer design quality from an equal
-fingerprint; it only proves that configured observations are equal.
-
-Never remove or weaken stable cases, probes, or health checks merely to make a
-change pass. Keep task configs ephemeral unless a case expresses a durable
-product invariant worth promoting to `shimon.config.mjs`. Never probe
-credentials, personal data, tokens, or authenticated content that must not be
-persisted. Confirm that sensitive content is covered by `screenshot.mask`.
-
-`shimon.config.mjs` is trusted executable code. Do not run it from an untrusted
-repository.
+設定は実行可能なコードなので、信頼できないリポジトリでは実行しない。スクリーンショットは機密要素をマスクし、`checks.evidence`へトークン、個人情報、認証状態を返さない。

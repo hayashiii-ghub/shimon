@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -8,68 +8,35 @@ import { main, parseCliArgs } from "../src/cli.ts";
 
 const roots: string[] = [];
 
-function artifact(value: number): string {
-  return `${JSON.stringify({
-    schemaVersion: 2,
-    toolVersion: "0.0.1",
-    target: { url: "http://127.0.0.1/" },
-    environment: {
-      browser: "chromium",
-      browserVersion: "test",
-      viewport: { width: 640, height: 480 },
-      deviceScaleFactor: 1,
-      locale: "en-US",
-      timezone: "UTC",
-    },
-    cases: [{ name: "start", viewport: { width: 640, height: 480 }, probe: { value } }],
-  })}\n`;
-}
-
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
 describe("parseCliArgs", () => {
   test("parses repeated verify case filters", () => {
-    expect(parseCliArgs(["verify", "--case", "home", "--case=mobile", "--json"])).toEqual({
+    expect(
+      parseCliArgs([
+        "verify",
+        "--case",
+        "home",
+        "--case=mobile",
+        "--task",
+        ".shimon/task.mjs",
+        "--json",
+      ]),
+    ).toEqual({
       command: "verify",
-      labels: [],
       caseNames: ["home", "mobile"],
       json: true,
       configPath: undefined,
+      taskPath: ".shimon/task.mjs",
     });
   });
 
-  test("parses capture options independently of their position", () => {
-    expect(parseCliArgs(["capture", "baseline", "--json", "--config", "custom.mjs"])).toEqual({
-      command: "capture",
-      labels: ["baseline"],
-      caseNames: [],
-      json: true,
-      configPath: "custom.mjs",
-    });
-  });
-
-  test("rejects missing diff labels", () => {
-    expect(() => parseCliArgs(["diff", "before"])).toThrow("diff requires two labels");
-  });
-
-  test("returns exit code 1 when stored fingerprints differ", async () => {
-    const root = await mkdtemp(join(tmpdir(), "shimon-cli-"));
-    roots.push(root);
-    await mkdir(join(root, ".shimon"));
-    await writeFile(join(root, ".shimon", "before.json"), artifact(1));
-    await writeFile(join(root, ".shimon", "after.json"), artifact(2));
-    const stdout = spyOn(process.stdout, "write").mockImplementation(() => true);
-
-    try {
-      expect(await main(["diff", "before", "after", "--json"], root)).toBe(1);
-      expect(stdout).toHaveBeenCalledWith(
-        '{"ok":false,"command":"diff","before":"before","after":"after","changes":[{"path":"cases[0].probe.value","before":1,"after":2}]}\n',
-      );
-    } finally {
-      stdout.mockRestore();
-    }
+  test("rejects removed fingerprint commands", () => {
+    expect(() => parseCliArgs(["capture", "baseline"])).toThrow("Unknown command: capture");
+    expect(() => parseCliArgs(["diff", "before", "after"])).toThrow("Unknown command: diff");
+    expect(() => parseCliArgs(["selftest"])).toThrow("Unknown command: selftest");
   });
 
   test("runs one verify case and emits one JSON result", async () => {
@@ -80,8 +47,7 @@ describe("parseCliArgs", () => {
       join(root, "shimon.config.mjs"),
       `export default {
         target: { url: ${JSON.stringify(`data:text/html,${encodeURIComponent(html)}`)} },
-        cases: [{ name: "home" }, { name: "other" }],
-        probe: () => ({ ready: true }),
+        cases: [{ name: "home", review: ["Heading is clear"] }, { name: "other" }],
       };`,
     );
     const stdout = spyOn(process.stdout, "write").mockImplementation(() => true);
@@ -93,11 +59,33 @@ describe("parseCliArgs", () => {
       expect(payload).toMatchObject({
         success: true,
         pass: true,
+        visualReviewRequired: true,
         command: "verify",
         summary: { total: 1, passed: 1, failed: 0 },
         cases: [{ name: "home", reproduce: "shimon verify --case home --json" }],
       });
       expect(payload.cases[0].evidence.screenshot).toStartWith(root);
+    } finally {
+      stdout.mockRestore();
+    }
+  }, 30_000);
+
+  test("does not report visual completion before screenshots are reviewed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "shimon-cli-"));
+    roots.push(root);
+    const html = '<html lang="en"><head><title>verify</title></head><body><main><h1>ready</h1></main></body></html>';
+    await writeFile(
+      join(root, "shimon.config.mjs"),
+      `export default {
+        target: { url: ${JSON.stringify(`data:text/html,${encodeURIComponent(html)}`)} },
+        cases: [{ name: "home", review: ["Heading is clear"] }],
+      };`,
+    );
+    const stdout = spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    try {
+      expect(await main(["verify"], root)).toBe(0);
+      expect(stdout).toHaveBeenCalledWith("automated checks passed; inspect 1 screenshot\n");
     } finally {
       stdout.mockRestore();
     }
@@ -111,7 +99,6 @@ describe("parseCliArgs", () => {
       `export default {
         target: { url: "data:text/html,<h1>ready</h1>" },
         cases: [{ name: "home" }],
-        probe: () => ({}),
       };`,
     );
     const stdout = spyOn(process.stdout, "write").mockImplementation(() => true);
@@ -141,7 +128,6 @@ describe("parseCliArgs", () => {
       `export default {
         target: { url: "data:text/html,<h1>ready</h1>" },
         cases: [{ name: "home" }],
-        probe: () => ({}),
       };`,
     );
     const stderr = spyOn(process.stderr, "write").mockImplementation(() => true);
@@ -175,7 +161,7 @@ describe("parseCliArgs", () => {
     const result = spawnSync(link, ["--version"], { encoding: "utf8" });
 
     expect(result.status).toBe(0);
-    expect(result.stdout).toBe("0.1.0\n");
+    expect(result.stdout).toBe("0.2.0\n");
   });
 
   test("keeps the tracked CLI bundle synchronized with its source", async () => {

@@ -1,193 +1,106 @@
 # shimon
 
-Turn task-specific UI quality checks into repeatable evidence for coding agents.
+コーディングエージェントが、変更したUIの状態を再現し、自動検査とスクリーンショットをまとめて確認するための小さなCLIです。
 
-The repository owns only the execution skeleton: target, development server,
-named responsive widths, and security masks. For each change, an agent derives
-the smallest useful cases and review criteria from the task and code, then
-`shimon` runs those states in isolated browser contexts and returns structured
-checks and screenshots.
+Shimonは見た目の良し悪しを判断しません。対象画面を開いて事実と画像を返し、最終判断はエージェントが行います。
 
-Shimon does not decide whether a design is good and it does not impose a
-component, token, or CSS system.
+## 導入
 
-## Install
-
-Shimon requires Node.js 22 or newer and Chromium for Playwright.
+Node.js 22以上とChromiumが必要です。
 
 ```sh
 npm install --save-dev @hayashiii/shimon
 npx playwright install chromium
 ```
 
-Run the project-local CLI with `npx shimon`:
+## 基本設定
 
-```sh
-npx shimon verify --json
-```
-
-## Agent loop
-
-```sh
-npx shimon verify --json
-npx shimon verify --case menu-mobile --json
-```
-
-One `verify` run launches Chromium once. Each case gets a fresh context and page,
-then produces:
-
-- the case URL, intent, named viewport, and screenshot review criteria;
-- the agent-defined `probe` and project checks;
-- overflow offenders with selectors and boxes;
-- console and uncaught page errors;
-- failed requests with redacted URLs;
-- axe accessibility violations;
-- a viewport screenshot with configured sensitive elements masked.
-
-The JSON contains absolute screenshot paths and a `reproduce` command for every
-case. Evidence is written under `.shimon/runs/<run-id>/`; `.shimon/latest.json`
-points to the latest manifest and only the three newest runs are retained.
-
-Exit codes are `0` when every case passes, `1` for an observed case or health
-failure, and `2` for usage, config, managed-server, browser, or other operational
-errors. With `--json`, stdout always contains exactly one JSON document; progress
-goes to stderr.
-
-## Fingerprints
-
-```sh
-npx shimon selftest
-npx shimon capture baseline
-npx shimon capture current
-npx shimon diff baseline current
-```
-
-`selftest` compares two fresh captures for nondeterminism. `capture` writes a
-schema-versioned fingerprint atomically, and `diff` reports changed JSON paths.
-Screenshots, durations, run IDs, and file paths are evidence and are not part of
-fingerprint comparison.
-
-## Project-owned skeleton
-
-The default `shimon.config.mjs` can contain no cases. A project normally owns
-only this stable skeleton:
+プロジェクトには、接続先、画面幅、開発サーバー、機密情報のマスクだけを置けます。恒久ケースがなければ`cases`は省略できます。
 
 ```js
+// shimon.config.mjs
 export default {
   target: { url: "http://127.0.0.1:4322/" },
   viewports: {
     desktop: { width: 1440, height: 900 },
-    tablet: { width: 768, height: 1024 },
     mobile: { width: 390, height: 844 },
   },
   webServer: {
-    command: "bun run dev",
+    command: "npm run dev",
     url: "http://127.0.0.1:4322/",
     reuseExisting: true,
     timeoutMs: 30_000,
   },
-  timeouts: { runMs: 120_000, caseMs: 20_000, navigationMs: 10_000 },
-  screenshot: { mask: ["[data-sensitive]", ".account-email"] },
+  screenshot: { mask: ["[data-sensitive]"] },
 };
 ```
 
-Loading this skeleton is valid. Running it without any cases exits with the
-operational error `cases_required`, so an empty run can never pass silently.
+設定はNode.jsとして実行されます。信頼できるリポジトリでだけ使ってください。
 
-Named viewports are CSS viewport sizes, not full device emulation. They give
-agents stable project-approved desktop, tablet, and mobile widths without
-hard-coding widths into every task.
+## 今回の確認ケース
 
-## Agent-authored task config
-
-For a UI task, the agent creates an ephemeral `.shimon/task.config.mjs` that
-extends the skeleton:
+UIを変更したら、必要な状態だけを`.shimon/task.mjs`へ書きます。基本設定や恒久ケースはプロジェクト側で維持します。
 
 ```js
-import base from "../shimon.config.mjs";
-
 export default {
-  ...base,
   cases: [
     {
-      name: "pricing-menu-mobile",
+      name: "menu-mobile",
       path: "/pricing",
       viewport: "mobile",
-      intent: "Verify the changed pricing menu at the narrow layout.",
-      prepare: (page) => page.getByRole("button", { name: "Menu" }).click(),
+      intent: "モバイルの料金メニューを確認する",
+      prepare: (page) =>
+        page.getByRole("button", { name: "Menu" }).click(),
       checks: [
         {
           id: "menu-visible",
-          description: "The opened menu remains inside the viewport",
-          async evaluate(page) {
-            const menu = page.getByRole("navigation");
-            return {
-              pass: await menu.isVisible(),
-              evidence: { links: await menu.getByRole("link").count() },
-            };
-          },
+          description: "メニューが表示されている",
+          evaluate: (page) =>
+            page.getByRole("navigation").isVisible(),
         },
       ],
       review: [
-        "Menu hierarchy is clear",
-        "Primary CTA remains prominent",
-        "No content appears clipped or overlapped",
+        "情報の優先順位が分かる",
+        "内容が欠けたり重なったりしていない",
       ],
     },
   ],
-  probe(page) {
-    return page.evaluate(() => ({
-      path: location.pathname,
-      width: innerWidth,
-    }));
-  },
 };
 ```
 
 ```sh
-npx shimon verify --config .shimon/task.config.mjs --json
+npx shimon verify --task .shimon/task.mjs --json
+npx shimon verify --case menu-mobile --task .shimon/task.mjs --json
 ```
 
-`path` is resolved against `target.url` and must start with a single `/`.
-`prepare(page)` creates an interaction state. `checks` are machine-passable assertions and may
-return a boolean or `{ pass, evidence }`. `review` contains visual questions for
-the calling agent; shimon returns them with the screenshot but does not pretend
-to judge them itself. Check evidence and probes must be JSON-serializable.
+各ケースは新しいブラウザーコンテキストで実行されます。`path`は`/`から始まるプロジェクト内のパス、`viewport`は基本設定の名前または幅と高さです。
 
-If the base config already contains durable cases, the task config should retain
-them with `cases: [...(base.cases ?? []), ...taskCases]`. Agents must not delete
-or weaken stable cases to make a change pass. Promote a task case into the base
-config only when it expresses a durable product invariant.
+## 結果
 
-Animations and transitions are disabled before stabilization by default. Set
-`freezeAnimations: false` only when motion itself is the invariant. Case names
-are stable machine identifiers and use letters, numbers, dots, dashes, or
-underscores.
+Shimonは同じ状態から次を返します。
 
-When `webServer` is configured, shimon reuses an already reachable server or
-starts the command and stops only the process it owns. The config is trusted
-executable code with access to Node.js and the browser; only run it in
-repositories you trust.
+- overflow
+- console errorと未処理のページエラー
+- failed request
+- axeによるアクセシビリティ違反
+- プロジェクト固有の`checks`
+- マスク済みスクリーンショット
+- `intent`と`review`
 
-## Security boundary
+`pass`は自動検査の結果です。スクリーンショットが保存されると`visualReviewRequired`は`true`になります。成功表示後も返された全画像を確認してください。
 
-Do not return credentials, personal data, session state, or access tokens from
-`probe`. Mask sensitive elements before screenshots are persisted. Target and
-request credentials, query parameters, and fragments are removed from recorded
-metadata and JSON output.
+終了コードは、自動検査通過が`0`、画面またはケースの失敗が`1`、設定・サーバー・ブラウザーなどの実行エラーが`2`です。
 
-Shimon screenshots are evidence for an agent to inspect. Shimon does not perform
-pixel diffing, aesthetic judgment, arbitrary URL collection, sitemap crawling,
-or archive management.
+証拠は`.shimon/runs/<run-id>/`へ保存され、`.shimon/latest.json`が最新結果を指します。直近3回だけを保持します。
 
-Console errors, uncaught page errors, request failures, accessibility selectors,
-and probe values are also persisted in the manifest and may be copied into agent
-or CI logs. Diagnostic strings have a fixed length limit and redact HTTP(S) URL
-credentials/query/fragment plus common secret fields, but this is best-effort;
-applications must not log secrets or personal data. Screenshot masks apply only
-to image pixels, not to probe values or browser diagnostics.
+## 安全上の注意
 
-## Development
+- `checks.evidence`へトークン、個人情報、認証状態を入れない
+- 画像へ残る機密要素は`screenshot.mask`へ追加する
+- 対象URLと診断メッセージの秘密情報除去は補助であり、アプリケーション自身も秘密をログへ出さない
+- Shimonは自動インストール、サイト巡回、画像差分、デザイン採点を行わない
+
+## 開発
 
 ```sh
 bun install

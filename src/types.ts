@@ -1,6 +1,6 @@
 import type { Page } from "playwright";
 
-import type { JsonValue } from "./canonicalize.ts";
+import type { JsonValue } from "./json.ts";
 
 export interface Viewport {
   width: number;
@@ -43,7 +43,6 @@ export interface ShimonConfig {
   };
   viewports?: Record<string, Viewport>;
   cases: ShimonCase[];
-  probe: (page: Page) => Promise<JsonValue> | JsonValue;
   stabilize?: (page: Page) => Promise<void> | void;
   freezeAnimations: boolean;
   screenshot?: {
@@ -64,27 +63,6 @@ export interface ShimonConfig {
 
 export interface LoadedConfig {
   path: string;
+  taskPath?: string;
   config: ShimonConfig;
-}
-
-export interface FingerprintArtifact {
-  schemaVersion: 2;
-  toolVersion: string;
-  target: {
-    url: string;
-  };
-  environment: {
-    browser: string;
-    browserVersion: string;
-    viewport: Viewport;
-    deviceScaleFactor: number;
-    locale: string;
-    timezone: string;
-  };
-  cases: Array<{
-    name: string;
-    url: string;
-    viewport: Viewport;
-    probe: JsonValue;
-  }>;
 }
