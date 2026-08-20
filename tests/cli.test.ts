@@ -161,7 +161,7 @@ describe("parseCliArgs", () => {
     const result = spawnSync(link, ["--version"], { encoding: "utf8" });
 
     expect(result.status).toBe(0);
-    expect(result.stdout).toBe("0.2.0\n");
+    expect(result.stdout).toBe("0.3.0\n");
   });
 
   test("keeps the tracked CLI bundle synchronized with its source", async () => {
