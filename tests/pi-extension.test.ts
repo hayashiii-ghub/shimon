@@ -6,7 +6,6 @@ import { dirname, join } from "node:path";
 import shimonForPi, { createShimonTool } from "../extensions/pi/index.ts";
 
 const roots: string[] = [];
-const browserTestTimeout = process.env.CI ? 90_000 : 30_000;
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -101,7 +100,7 @@ describe("shimon pi extension", () => {
         (await readFile(result.details.cases[0].evidence.screenshot as string)).toString("base64"),
       );
     }
-  }, browserTestTimeout);
+  }, 30_000);
 
   test("verifies an inline URL and cases without project configuration", async () => {
     const root = await mkdtemp(join(tmpdir(), "shimon-pi-"));
@@ -147,7 +146,7 @@ describe("shimon pi extension", () => {
     expect((await stat(dirname(result.details.manifest))).mode & 0o777).toBe(0o700);
     expect((await stat(result.details.cases[0].evidence.screenshot!)).mode & 0o777).toBe(0o600);
     await expect(access(join(root, ".shimon"))).rejects.toThrow();
-  }, browserTestTimeout);
+  }, 30_000);
 
   test("reports zero-config guidance when neither a URL nor project config is provided", async () => {
     const root = await mkdtemp(join(tmpdir(), "shimon-pi-"));

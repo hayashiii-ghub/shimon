@@ -7,7 +7,6 @@ import { join, resolve } from "node:path";
 import { main, parseCliArgs } from "../src/cli.ts";
 
 const roots: string[] = [];
-const browserTestTimeout = process.env.CI ? 90_000 : 30_000;
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -69,7 +68,7 @@ describe("parseCliArgs", () => {
     } finally {
       stdout.mockRestore();
     }
-  }, browserTestTimeout);
+  }, 30_000);
 
   test("does not report visual completion before screenshots are reviewed", async () => {
     const root = await mkdtemp(join(tmpdir(), "shimon-cli-"));
@@ -90,7 +89,7 @@ describe("parseCliArgs", () => {
     } finally {
       stdout.mockRestore();
     }
-  }, browserTestTimeout);
+  }, 30_000);
 
   test("emits operational errors as one JSON document on stdout", async () => {
     const root = await mkdtemp(join(tmpdir(), "shimon-cli-"));

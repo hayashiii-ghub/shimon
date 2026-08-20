@@ -8,7 +8,6 @@ import type { ShimonConfig } from "../src/types.ts";
 import { verifyProject } from "../src/verify.ts";
 
 const roots: string[] = [];
-const browserTestTimeout = process.env.CI ? 90_000 : 30_000;
 
 function paeth(left: number, above: number, upperLeft: number): number {
   const prediction = left + above - upperLeft;
@@ -181,7 +180,7 @@ describe("verifyProject", () => {
     } finally {
       server.stop(true);
     }
-  }, browserTestTimeout);
+  }, 30_000);
 
   test("manages the configured web server around the verification run", async () => {
     const reservation = Bun.serve({ port: 0, fetch: () => new Response("reserved") });
@@ -212,7 +211,7 @@ describe("verifyProject", () => {
     expect(result.pass).toBeTrue();
     expect(result.run.webServer).toEqual({ managed: true, reused: false });
     await expect(fetch(url)).rejects.toThrow();
-  }, browserTestTimeout);
+  }, 30_000);
 
   test("rejects an unknown selected case", async () => {
     const root = await mkdtemp(join(tmpdir(), "shimon-verify-"));
@@ -264,7 +263,7 @@ describe("verifyProject", () => {
     expect(result.cases[1]).toMatchObject({ name: "ready", pass: true });
     expect(result.summary).toEqual({ total: 2, passed: 1, failed: 1 });
     expect((await stat(result.cases[1].evidence.screenshot!)).size).toBeGreaterThan(0);
-  }, browserTestTimeout);
+  }, 30_000);
 
   test("bounds a case whose project hook never resolves", async () => {
     const root = await mkdtemp(join(tmpdir(), "shimon-verify-"));
@@ -371,7 +370,7 @@ describe("verifyProject", () => {
     } finally {
       server.stop(true);
     }
-  }, browserTestTimeout);
+  }, 30_000);
 
   test("returns actionable evidence for overflow, console, request, and a11y failures", async () => {
     const server = Bun.serve({
@@ -421,7 +420,7 @@ describe("verifyProject", () => {
     } finally {
       server.stop(true);
     }
-  }, browserTestTimeout);
+  }, 30_000);
 
   test("masks sensitive elements in screenshot evidence", async () => {
     const server = Bun.serve({
@@ -448,5 +447,5 @@ describe("verifyProject", () => {
     } finally {
       server.stop(true);
     }
-  }, browserTestTimeout);
+  }, 30_000);
 });
