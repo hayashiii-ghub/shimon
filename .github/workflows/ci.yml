@@ -18,8 +18,9 @@ jobs:
           node-version: 22
       - run: bun install --frozen-lockfile
       - run: bunx playwright install --with-deps chromium
-      - run: bun test
+      - run: bun run test
       - run: bun run typecheck
+      - run: bun run check:reload
       - run: bun run build
       - run: git diff --exit-code -- dist/cli.js
       - run: npm pack --dry-run

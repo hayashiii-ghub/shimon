@@ -206,7 +206,7 @@ describe("parseCliArgs", () => {
 
     const packed = spawnSync(
       "npm",
-      ["pack", "--dry-run", "--json", "--cache", join(root, "npm-cache")],
+      ["pack", "--dry-run", "--json", "--ignore-scripts", "--cache", join(root, "npm-cache")],
       { cwd: root, encoding: "utf8" },
     );
     expect(packed.status).toBe(0);
@@ -221,7 +221,7 @@ describe("parseCliArgs", () => {
     const repository = resolve(import.meta.dir, "..");
     const packed = spawnSync(
       "npm",
-      ["pack", "--dry-run", "--json", "--cache", join(root, "npm-cache")],
+      ["pack", "--dry-run", "--json", "--ignore-scripts", "--cache", join(root, "npm-cache")],
       { cwd: repository, encoding: "utf8" },
     );
     expect(packed.status).toBe(0);
