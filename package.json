@@ -35,7 +35,7 @@
     "check:package": "bun scripts/check-package.ts",
     "check:reload": "bun scripts/check-config-reload.ts",
     "prepack": "bun run build && bun run check:package && bun run check:reload",
-    "test": "bun test --parallel=1",
+    "test": "bun scripts/test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
