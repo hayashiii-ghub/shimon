@@ -3,23 +3,26 @@ name: shimon
 description: UI・レイアウト・操作の変更を、プロジェクト固有のケースとスクリーンショットで確認する。
 ---
 
-# Shimon
+# shimon
 
-信頼できるリポジトリに`shimon.config.mjs`があり、UI・レイアウト・操作を変更したときに使う。
+UI・レイアウト・操作を変更したときに使う。`shimon_verify`が利用できる場合は、起動済みの画面URLと今回の確認ケースを直接渡す。設定ファイルは不要。
 
 ## 確認ケースを作る
 
 1. 依頼、差分、変更した画面とコンポーネントを確認する
-2. `.shimon/task.mjs`へ、変更に関係する2〜5個のケースを書く
+2. 変更に関係する1〜5個のケースを作る
 3. 主な画面幅を使い、構造が変わる場合だけモバイルも加える
-4. メニュー、ダイアログ、タブなどは`prepare(page)`で対象状態を作る
-5. 機械で決められる条件は`checks`、画像を見て判断する観点は`review`へ書く
+4. 各ケースへASCIIの`name`、必要なら`path`と`viewport`、画像を見て判断する`intent`と`review`を書く
 
 全ルートと全画面幅の組み合わせは作らない。プロジェクト側で維持する恒久ケースは、タスクファイルへ複製しない。
 
 ## 実行して確認する
 
-リポジトリに所定のコマンドがあればそれを使い、なければ次を実行する。
+対象の開発サーバーを起動し、`shimon_verify`へ絶対URLとケースを渡す。機密要素がある場合は`mask`へCSSセレクターを渡す。
+
+プロジェクトに信頼できる`shimon.config.mjs`がある場合は、URLを渡さず既存設定を利用してよい。サーバー起動、`prepare(page)`、独自`checks`、再利用する高度な設定が必要な場合だけ、設定ファイルと`.shimon/task.mjs`を使う。
+
+`shimon_verify`が利用できない場合は、リポジトリ所定のコマンドを使う。なければ設定とタスクを用意して次を実行する。
 
 ```sh
 npx shimon verify --task .shimon/task.mjs --json
@@ -27,10 +30,10 @@ npx shimon verify --task .shimon/task.mjs --json
 
 1. `pass`、overflow、console error、failed request、アクセシビリティ、プロジェクト検査を確認する
 2. 返された全スクリーンショットを開き、`intent`と`review`の各項目を判断する
-3. 失敗ケースを`--case <name>`で再実行し、最後に全ケースを1回通す
-4. 作業後に`.shimon/task.mjs`を削除する
+3. 失敗ケースだけを再実行し、最後に関係する全ケースを1回通す
+4. 一時的な`.shimon/task.mjs`を作った場合は作業後に削除する
 
-`visualReviewRequired: true`は自動検査が通っても画像確認が残っていることを示す。Shimon自身がデザインを採点したとは扱わない。
+`visualReviewRequired: true`は自動検査が通っても画像確認が残っていることを示す。shimon自身がデザインを採点したとは扱わない。
 
 ## 安全
 

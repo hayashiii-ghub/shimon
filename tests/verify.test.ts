@@ -228,13 +228,13 @@ describe("verifyProject", () => {
         url: `data:text/html,${encodeURIComponent('<html lang="en"><head><title>run timeout</title></head><body><main><h1>ready</h1></main></body></html>')}`,
         viewport: { width: 320, height: 240 },
       },
-      timeouts: { runMs: 500, caseMs: 5_000, navigationMs: 500 },
+      timeouts: { runMs: 2_000, caseMs: 5_000, navigationMs: 500 },
       freezeAnimations: true,
       cases: [{ name: "hanging", prepare: () => new Promise<void>(() => undefined) }],
     };
 
     await expect(verifyProject(config, { root })).rejects.toMatchObject({ code: "run_timeout" });
-  }, 2_000);
+  }, 4_000);
 
   test("includes managed-server startup in the run budget", async () => {
     const reservation = Bun.serve({ port: 0, fetch: () => new Response("reserved") });

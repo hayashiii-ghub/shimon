@@ -335,7 +335,7 @@ function sanitizeDiagnosticText(value) {
 }
 
 // src/version.ts
-var TOOL_VERSION = "0.2.0";
+var TOOL_VERSION = "0.3.0";
 
 // src/verify.ts
 import { createHash, randomUUID as randomUUID2 } from "node:crypto";
