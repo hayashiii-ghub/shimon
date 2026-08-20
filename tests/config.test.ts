@@ -29,6 +29,30 @@ describe("loadConfig", () => {
     expect(loaded.config.target.viewport).toEqual({ width: 1200, height: 900 });
   });
 
+  test("reloads edited config and task modules in the same process", async () => {
+    const root = await mkdtemp(join(tmpdir(), "shimon-config-"));
+    roots.push(root);
+    const configPath = join(root, "shimon.config.mjs");
+    const taskPath = join(root, "task.mjs");
+    await writeFile(
+      configPath,
+      `export default { target: { url: "http://127.0.0.1:1111/" }, cases: [{ name: "first" }] };`,
+    );
+    await writeFile(taskPath, `export default { cases: [{ name: "task-first" }] };`);
+    const first = await loadConfig({ cwd: root, taskPath: "task.mjs" });
+
+    await writeFile(
+      configPath,
+      `export default { target: { url: "http://127.0.0.1:2222/" }, cases: [{ name: "second" }] };`,
+    );
+    await writeFile(taskPath, `export default { cases: [{ name: "task-second" }] };`);
+    const second = await loadConfig({ cwd: root, taskPath: "task.mjs" });
+
+    expect(first.config.cases.map((testCase) => testCase.name)).toEqual(["first", "task-first"]);
+    expect(second.config.target.url).toBe("http://127.0.0.1:2222/");
+    expect(second.config.cases.map((testCase) => testCase.name)).toEqual(["second", "task-second"]);
+  });
+
   test("loads a project-owned skeleton without cases", async () => {
     const root = await mkdtemp(join(tmpdir(), "shimon-config-"));
     roots.push(root);

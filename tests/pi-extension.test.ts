@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import shimonForPi, { createShimonTool } from "../extensions/pi/index.ts";
 
@@ -143,6 +143,8 @@ describe("shimon pi extension", () => {
     });
     expect(result.content[1]).toMatchObject({ type: "image", mimeType: "image/png" });
     expect(result.details.manifest.startsWith(join(tmpdir(), "shimon-pi"))).toBe(true);
+    expect((await stat(dirname(result.details.manifest))).mode & 0o777).toBe(0o700);
+    expect((await stat(result.details.cases[0].evidence.screenshot!)).mode & 0o777).toBe(0o600);
     await expect(access(join(root, ".shimon"))).rejects.toThrow();
   }, 30_000);
 

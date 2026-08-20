@@ -4,6 +4,7 @@
 import { resolve as resolve3 } from "node:path";
 
 // src/config.ts
+import { randomUUID } from "node:crypto";
 import { access } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -32,6 +33,11 @@ function operationalError(error) {
 var DEFAULT_CONFIG = "shimon.config.mjs";
 var DEFAULT_VIEWPORT = { width: 1200, height: 900 };
 var DEFAULT_TIMEOUTS = { runMs: 120000, caseMs: 20000, navigationMs: 1e4 };
+async function importFresh(path) {
+  const url = pathToFileURL(path);
+  url.searchParams.set("shimon_reload", randomUUID());
+  return await import(url.href);
+}
 function invalid(message, hint = "Check shimon.config.mjs.") {
   throw new ShimonError("config_invalid", message, hint);
 }
@@ -257,7 +263,7 @@ async function loadConfig(options) {
   }
   let module;
   try {
-    module = await import(pathToFileURL(path).href);
+    module = await importFresh(path);
   } catch (error) {
     throw new ShimonError("config_load_failed", `Could not load config: ${path}`, undefined, {
       cause: error
@@ -274,7 +280,7 @@ async function loadConfig(options) {
   }
   let taskModule;
   try {
-    taskModule = await import(pathToFileURL(taskPath).href);
+    taskModule = await importFresh(taskPath);
   } catch (error) {
     throw new ShimonError("task_load_failed", `Could not load task config: ${taskPath}`, undefined, {
       cause: error
@@ -335,11 +341,11 @@ function sanitizeDiagnosticText(value) {
 }
 
 // src/version.ts
-var TOOL_VERSION = "0.3.0";
+var TOOL_VERSION = "0.3.1";
 
 // src/verify.ts
-import { createHash, randomUUID as randomUUID2 } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { createHash, randomUUID as randomUUID3 } from "node:crypto";
+import { chmod, mkdir } from "node:fs/promises";
 import { join as join2, resolve as resolve2 } from "node:path";
 import { chromium } from "playwright";
 
@@ -464,14 +470,18 @@ async function runPageChecks(page, failures) {
 }
 
 // src/evidence.ts
-import { randomUUID } from "node:crypto";
-import { readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { randomUUID as randomUUID2 } from "node:crypto";
+import { access as access2, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 async function writeJsonAtomic(path, value) {
-  const temporary = `${path}.${randomUUID()}.tmp`;
+  const temporary = `${path}.${randomUUID2()}.tmp`;
   try {
     await writeFile(temporary, `${JSON.stringify(value)}
-`, { encoding: "utf8", flag: "wx" });
+`, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 384
+    });
     await rename(temporary, path);
   } finally {
     await rm(temporary, { force: true });
@@ -480,10 +490,13 @@ async function writeJsonAtomic(path, value) {
 async function pruneRunDirectories(root, keep) {
   const runs = join(root, "runs");
   const entries = await readdir(runs, { withFileTypes: true }).catch(() => []);
-  const directories = await Promise.all(entries.filter((entry) => entry.isDirectory()).map(async (entry) => {
+  const directories = (await Promise.all(entries.filter((entry) => entry.isDirectory()).map(async (entry) => {
     const path = join(runs, entry.name);
-    return { path, mtimeMs: (await stat(path)).mtimeMs };
-  }));
+    const manifest = join(path, "manifest.json");
+    if (!await access2(manifest).then(() => true).catch(() => false))
+      return null;
+    return { path, mtimeMs: (await stat(manifest)).mtimeMs };
+  }))).filter((entry) => entry !== null);
   directories.sort((left, right) => left.mtimeMs - right.mtimeMs || left.path.localeCompare(right.path));
   const removed = directories.slice(0, Math.max(0, directories.length - keep)).map((entry) => entry.path);
   await Promise.all(removed.map((path) => rm(path, { recursive: true, force: true })));
@@ -656,6 +669,20 @@ async function beforeDeadline(promise, deadline, code, message) {
       clearTimeout(timer);
   }
 }
+async function acquireBeforeDeadline(promise, deadline, code, message, release) {
+  try {
+    return await beforeDeadline(promise, deadline, code, message);
+  } catch (error) {
+    promise.then(release).catch(() => {
+      return;
+    });
+    throw error;
+  }
+}
+async function secureScreenshot(path) {
+  await chmod(path, 384);
+  return path;
+}
 async function verifyProject(config, options) {
   if (config.cases.length === 0) {
     throw new ShimonError("cases_required", "No verification cases are configured.", "Create an agent-authored task config with at least one case and pass --task <path>.");
@@ -668,11 +695,11 @@ async function verifyProject(config, options) {
   if (unknownCase) {
     throw new ShimonError("case_not_found", `Unknown case: ${unknownCase}`, `Available cases: ${config.cases.map((testCase) => testCase.name).join(", ")}`);
   }
-  const runId = randomUUID2();
+  const runId = randomUUID3();
   const root = resolve2(options.root);
   const runDirectory = join2(root, "runs", runId);
   const screenshotDirectory = join2(runDirectory, "screenshots");
-  await mkdir(screenshotDirectory, { recursive: true });
+  await mkdir(screenshotDirectory, { recursive: true, mode: 448 });
   const selected = requestedCases.length ? config.cases.filter((testCase) => requestedCases.includes(testCase.name)) : config.cases;
   let webServer;
   if (config.webServer) {
@@ -698,7 +725,7 @@ async function verifyProject(config, options) {
   const cases = [];
   const reproduce = (caseName) => `shimon verify --case ${caseName}${options.configPath ? ` --config ${JSON.stringify(options.configPath)}` : ""}${options.taskPath ? ` --task ${JSON.stringify(options.taskPath)}` : ""} --json`;
   try {
-    const browser = await beforeDeadline(chromium.launch({ headless: true }), runDeadline, "run_timeout", "Verification run timed out while launching Chromium.");
+    const browser = await acquireBeforeDeadline(chromium.launch({ headless: true }), runDeadline, "run_timeout", "Verification run timed out while launching Chromium.", (lateBrowser) => lateBrowser.close());
     try {
       for (const [caseIndex, testCase] of selected.entries()) {
         const caseBudgetDeadline = Date.now() + (config.timeouts?.caseMs ?? 20000);
@@ -708,7 +735,7 @@ async function verifyProject(config, options) {
         const viewport = testCase.viewport ?? config.target.viewport;
         const caseUrl = testCase.path === undefined ? config.target.url : new URL(testCase.path, config.target.url).toString();
         const recordedCaseUrl = publicTargetUrl(caseUrl);
-        const context = await beforeDeadline(browser.newContext({ viewport }), runDeadline, "run_timeout", `Verification run timed out while creating context for case: ${testCase.name}`);
+        const context = await acquireBeforeDeadline(browser.newContext({ viewport }), runDeadline, "run_timeout", `Verification run timed out while creating context for case: ${testCase.name}`, (lateContext) => lateContext.close());
         const screenshot = join2(screenshotDirectory, caseFilename(caseIndex, testCase.name));
         try {
           const page = await context.newPage();
@@ -729,6 +756,7 @@ async function verifyProject(config, options) {
               mask: (config.screenshot?.mask ?? []).map((selector) => page.locator(selector)),
               maskColor: "#000000"
             }));
+            await secureScreenshot(screenshot);
             const builtInChecks = await withinCase(runPageChecks(page, failures));
             const project = await runProjectChecks(page, testCase.checks, withinCase);
             const checks = { ...builtInChecks, project };
@@ -756,7 +784,7 @@ async function verifyProject(config, options) {
               mask: (config.screenshot?.mask ?? []).map((selector) => page.locator(selector)),
               maskColor: "#000000",
               timeout: Math.min(config.timeouts?.caseMs ?? 20000, 2000)
-            }).then(() => screenshot).catch(() => null);
+            }).then(() => secureScreenshot(screenshot)).catch(() => null);
             cases.push({
               name: testCase.name,
               url: recordedCaseUrl,

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { access } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -8,6 +9,12 @@ import type { LoadedConfig, ProjectCheck, ShimonCase, ShimonConfig, Viewport } f
 const DEFAULT_CONFIG = "shimon.config.mjs";
 const DEFAULT_VIEWPORT: Viewport = { width: 1200, height: 900 };
 const DEFAULT_TIMEOUTS = { runMs: 120_000, caseMs: 20_000, navigationMs: 10_000 };
+
+async function importFresh(path: string): Promise<{ default?: unknown }> {
+  const url = pathToFileURL(path);
+  url.searchParams.set("shimon_reload", randomUUID());
+  return (await import(url.href)) as { default?: unknown };
+}
 
 function invalid(message: string, hint = "Check shimon.config.mjs."): never {
   throw new ShimonError("config_invalid", message, hint);
@@ -245,7 +252,7 @@ export async function loadConfig(options: {
 
   let module: { default?: unknown };
   try {
-    module = (await import(pathToFileURL(path).href)) as { default?: unknown };
+    module = await importFresh(path);
   } catch (error) {
     throw new ShimonError("config_load_failed", `Could not load config: ${path}`, undefined, {
       cause: error,
@@ -271,7 +278,7 @@ export async function loadConfig(options: {
 
   let taskModule: { default?: unknown };
   try {
-    taskModule = (await import(pathToFileURL(taskPath).href)) as { default?: unknown };
+    taskModule = await importFresh(taskPath);
   } catch (error) {
     throw new ShimonError("task_load_failed", `Could not load task config: ${taskPath}`, undefined, {
       cause: error,
