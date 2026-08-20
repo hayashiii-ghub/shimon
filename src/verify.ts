@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { chmod, mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { chromium } from "playwright";
@@ -96,6 +96,26 @@ async function beforeDeadline<T>(
   }
 }
 
+async function acquireBeforeDeadline<T>(
+  promise: Promise<T>,
+  deadline: number,
+  code: "case_timeout" | "run_timeout",
+  message: string,
+  release: (value: T) => Promise<unknown>,
+): Promise<T> {
+  try {
+    return await beforeDeadline(promise, deadline, code, message);
+  } catch (error) {
+    void promise.then(release).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function secureScreenshot(path: string): Promise<string> {
+  await chmod(path, 0o600);
+  return path;
+}
+
 export async function verifyProject(
   config: ShimonConfig,
   options: {
@@ -129,7 +149,7 @@ export async function verifyProject(
   const root = resolve(options.root);
   const runDirectory = join(root, "runs", runId);
   const screenshotDirectory = join(runDirectory, "screenshots");
-  await mkdir(screenshotDirectory, { recursive: true });
+  await mkdir(screenshotDirectory, { recursive: true, mode: 0o700 });
   const selected = requestedCases.length
     ? config.cases.filter((testCase) => requestedCases.includes(testCase.name))
     : config.cases;
@@ -161,11 +181,12 @@ export async function verifyProject(
     }${options.taskPath ? ` --task ${JSON.stringify(options.taskPath)}` : ""} --json`;
 
   try {
-    const browser = await beforeDeadline(
+    const browser = await acquireBeforeDeadline(
       chromium.launch({ headless: true }),
       runDeadline,
       "run_timeout",
       "Verification run timed out while launching Chromium.",
+      (lateBrowser) => lateBrowser.close(),
     );
     try {
       for (const [caseIndex, testCase] of selected.entries()) {
@@ -187,11 +208,12 @@ export async function verifyProject(
             ? config.target.url
             : new URL(testCase.path, config.target.url).toString();
         const recordedCaseUrl = publicTargetUrl(caseUrl);
-        const context = await beforeDeadline(
+        const context = await acquireBeforeDeadline(
           browser.newContext({ viewport }),
           runDeadline,
           "run_timeout",
           `Verification run timed out while creating context for case: ${testCase.name}`,
+          (lateContext) => lateContext.close(),
         );
         const screenshot = join(screenshotDirectory, caseFilename(caseIndex, testCase.name));
         try {
@@ -217,6 +239,7 @@ export async function verifyProject(
                 maskColor: "#000000",
               }),
             );
+            await secureScreenshot(screenshot);
             const builtInChecks = await withinCase(runPageChecks(page, failures));
             const project = await runProjectChecks(page, testCase.checks, withinCase);
             const checks = { ...builtInChecks, project };
@@ -247,7 +270,7 @@ export async function verifyProject(
                 maskColor: "#000000",
                 timeout: Math.min(config.timeouts?.caseMs ?? 20_000, 2_000),
               })
-              .then(() => screenshot)
+              .then(() => secureScreenshot(screenshot))
               .catch(() => null);
             cases.push({
               name: testCase.name,

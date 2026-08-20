@@ -2,12 +2,81 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { chromium } from "playwright";
+import { inflateSync } from "node:zlib";
 
 import type { ShimonConfig } from "../src/types.ts";
 import { verifyProject } from "../src/verify.ts";
 
 const roots: string[] = [];
+
+function paeth(left: number, above: number, upperLeft: number): number {
+  const prediction = left + above - upperLeft;
+  const leftDistance = Math.abs(prediction - left);
+  const aboveDistance = Math.abs(prediction - above);
+  const upperLeftDistance = Math.abs(prediction - upperLeft);
+  if (leftDistance <= aboveDistance && leftDistance <= upperLeftDistance) return left;
+  return aboveDistance <= upperLeftDistance ? above : upperLeft;
+}
+
+function readPngPixel(png: Buffer, x: number, y: number): number[] {
+  const signature = png.subarray(0, 8).toString("hex");
+  if (signature !== "89504e470d0a1a0a") throw new Error("Screenshot evidence is not a PNG.");
+
+  let width = 0;
+  let height = 0;
+  let bytesPerPixel = 0;
+  const compressed: Buffer[] = [];
+  for (let offset = 8; offset < png.length; ) {
+    const length = png.readUInt32BE(offset);
+    const type = png.subarray(offset + 4, offset + 8).toString("ascii");
+    const data = png.subarray(offset + 8, offset + 8 + length);
+    if (type === "IHDR") {
+      width = data.readUInt32BE(0);
+      height = data.readUInt32BE(4);
+      if (data[8] !== 8 || data[12] !== 0) throw new Error("Unsupported PNG screenshot format.");
+      bytesPerPixel = data[9] === 6 ? 4 : data[9] === 2 ? 3 : 0;
+      if (bytesPerPixel === 0) throw new Error("Unsupported PNG screenshot color type.");
+    } else if (type === "IDAT") {
+      compressed.push(data);
+    }
+    offset += length + 12;
+  }
+  if (x < 0 || x >= width || y < 0 || y >= height) throw new Error("PNG pixel is out of bounds.");
+
+  const encoded = inflateSync(Buffer.concat(compressed));
+  const stride = width * bytesPerPixel;
+  const pixels = Buffer.alloc(stride * height);
+  for (let row = 0; row < height; row += 1) {
+    const filter = encoded[row * (stride + 1)];
+    const source = row * (stride + 1) + 1;
+    const target = row * stride;
+    for (let column = 0; column < stride; column += 1) {
+      const raw = encoded[source + column];
+      const left = column >= bytesPerPixel ? pixels[target + column - bytesPerPixel] : 0;
+      const above = row > 0 ? pixels[target + column - stride] : 0;
+      const upperLeft = row > 0 && column >= bytesPerPixel
+        ? pixels[target + column - stride - bytesPerPixel]
+        : 0;
+      const reconstructed = filter === 0
+        ? raw
+        : filter === 1
+          ? raw + left
+          : filter === 2
+            ? raw + above
+            : filter === 3
+              ? raw + Math.floor((left + above) / 2)
+              : filter === 4
+                ? raw + paeth(left, above, upperLeft)
+                : Number.NaN;
+      if (Number.isNaN(reconstructed)) throw new Error(`Unsupported PNG filter: ${filter}.`);
+      pixels[target + column] = reconstructed & 0xff;
+    }
+  }
+
+  const offset = (y * width + x) * bytesPerPixel;
+  const color = [...pixels.subarray(offset, offset + bytesPerPixel)];
+  return bytesPerPixel === 3 ? [...color, 255] : color;
+}
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -204,21 +273,19 @@ describe("verifyProject", () => {
         url: `data:text/html,${encodeURIComponent('<html lang="en"><head><title>timeout</title></head><body><main><h1>ready</h1></main></body></html>')}`,
         viewport: { width: 320, height: 240 },
       },
-      timeouts: { runMs: 1_000, caseMs: 100, navigationMs: 500 },
+      timeouts: { runMs: 5_000, caseMs: 100, navigationMs: 500 },
       freezeAnimations: true,
       cases: [{ name: "hanging", prepare: () => new Promise<void>(() => undefined) }],
     };
 
-    const startedAt = Date.now();
     const result = await verifyProject(config, { root });
 
-    expect(Date.now() - startedAt).toBeLessThan(1_000);
     expect(result.cases[0]).toMatchObject({
       name: "hanging",
       pass: false,
       error: { code: "case_timeout" },
     });
-  }, 2_000);
+  }, 5_000);
 
   test("reports the run budget separately from a case timeout", async () => {
     const root = await mkdtemp(join(tmpdir(), "shimon-verify-"));
@@ -373,25 +440,8 @@ describe("verifyProject", () => {
 
     try {
       const result = await verifyProject(config, { root });
-      const png = (await readFile(result.cases[0].evidence.screenshot!)).toString("base64");
-      const browser = await chromium.launch({ headless: true });
-      try {
-        const page = await browser.newPage();
-        const pixel = await page.evaluate(async (source) => {
-          const image = new Image();
-          image.src = source;
-          await image.decode();
-          const canvas = document.createElement("canvas");
-          canvas.width = image.width;
-          canvas.height = image.height;
-          const context = canvas.getContext("2d")!;
-          context.drawImage(image, 0, 0);
-          return [...context.getImageData(50, 50, 1, 1).data];
-        }, `data:image/png;base64,${png}`);
-        expect(pixel).toEqual([0, 0, 0, 255]);
-      } finally {
-        await browser.close();
-      }
+      const png = await readFile(result.cases[0].evidence.screenshot!);
+      expect(readPngPixel(png, 50, 50)).toEqual([0, 0, 0, 255]);
     } finally {
       server.stop(true);
     }

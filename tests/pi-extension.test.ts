@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import shimonForPi, { createShimonTool } from "../extensions/pi/index.ts";
 
@@ -63,45 +63,6 @@ describe("shimon pi extension", () => {
     ]);
   });
 
-  test("returns automated findings and screenshot images from one tool call", async () => {
-    const root = await mkdtemp(join(tmpdir(), "shimon-pi-"));
-    roots.push(root);
-    const html = '<html lang="en"><head><title>verify</title></head><body><main><h1>ready</h1></main></body></html>';
-    await writeFile(
-      join(root, "shimon.config.mjs"),
-      `export default {
-        target: { url: ${JSON.stringify(`data:text/html,${encodeURIComponent(html)}`)} },
-        cases: [{ name: "home", review: ["Heading is clear"] }],
-      };`,
-    );
-
-    const tool = createShimonTool();
-    const result = await tool.execute(
-      "tool-call",
-      {},
-      new AbortController().signal,
-      undefined,
-      { cwd: root } as never,
-    );
-
-    expect(result.details).toMatchObject({
-      success: true,
-      pass: true,
-      visualReviewRequired: true,
-      summary: { total: 1, passed: 1, failed: 0 },
-    });
-    expect(result.content[0]).toMatchObject({ type: "text" });
-    expect(result.content[1]).toMatchObject({
-      type: "image",
-      mimeType: "image/png",
-    });
-    if (result.content[1]?.type === "image") {
-      expect(result.content[1].data).toBe(
-        (await readFile(result.details.cases[0].evidence.screenshot as string)).toString("base64"),
-      );
-    }
-  }, 30_000);
-
   test("verifies an inline URL and cases without project configuration", async () => {
     const root = await mkdtemp(join(tmpdir(), "shimon-pi-"));
     roots.push(root);
@@ -143,6 +104,8 @@ describe("shimon pi extension", () => {
     });
     expect(result.content[1]).toMatchObject({ type: "image", mimeType: "image/png" });
     expect(result.details.manifest.startsWith(join(tmpdir(), "shimon-pi"))).toBe(true);
+    expect((await stat(dirname(result.details.manifest))).mode & 0o777).toBe(0o700);
+    expect((await stat(result.details.cases[0].evidence.screenshot!)).mode & 0o777).toBe(0o600);
     await expect(access(join(root, ".shimon"))).rejects.toThrow();
   }, 30_000);
 

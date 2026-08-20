@@ -4,7 +4,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { access, readFile } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
@@ -102,9 +102,23 @@ interface ShimonParameters {
 
 const DEFAULT_VIEWPORT: Viewport = { width: 1200, height: 900 };
 
-function inlineEvidenceRoot(cwd: string): string {
+async function privateDirectory(path: string): Promise<void> {
+  await mkdir(path, { recursive: true, mode: 0o700 });
+  const info = await lstat(path);
+  const currentUid = process.getuid?.();
+  if (!info.isDirectory() || info.isSymbolicLink() || (currentUid !== undefined && info.uid !== currentUid)) {
+    throw new ShimonError("evidence_root_invalid", `Unsafe evidence directory: ${path}`);
+  }
+  await chmod(path, 0o700);
+}
+
+async function inlineEvidenceRoot(cwd: string): Promise<string> {
+  const base = resolve(tmpdir(), "shimon-pi");
+  await privateDirectory(base);
   const projectId = createHash("sha256").update(resolve(cwd)).digest("hex").slice(0, 16);
-  return resolve(tmpdir(), "shimon-pi", projectId);
+  const root = resolve(base, projectId);
+  await privateDirectory(root);
+  return root;
 }
 
 function inlineConfig(params: ShimonParameters): ShimonConfig {
@@ -235,7 +249,7 @@ export function createShimonTool(): ToolDefinition<typeof shimonParameters, Veri
               })
             ).config;
         const result = await verifyProject(config, {
-          root: params.url ? inlineEvidenceRoot(ctx.cwd) : resolve(ctx.cwd, ".shimon"),
+          root: params.url ? await inlineEvidenceRoot(ctx.cwd) : resolve(ctx.cwd, ".shimon"),
           caseNames: params.caseNames,
           cwd: ctx.cwd,
           configPath: params.configPath,

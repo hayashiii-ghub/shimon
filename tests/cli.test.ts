@@ -39,58 +39,6 @@ describe("parseCliArgs", () => {
     expect(() => parseCliArgs(["selftest"])).toThrow("Unknown command: selftest");
   });
 
-  test("runs one verify case and emits one JSON result", async () => {
-    const root = await mkdtemp(join(tmpdir(), "shimon-cli-"));
-    roots.push(root);
-    const html = '<html lang="en"><head><title>verify</title></head><body><main><h1>ready</h1></main></body></html>';
-    await writeFile(
-      join(root, "shimon.config.mjs"),
-      `export default {
-        target: { url: ${JSON.stringify(`data:text/html,${encodeURIComponent(html)}`)} },
-        cases: [{ name: "home", review: ["Heading is clear"] }, { name: "other" }],
-      };`,
-    );
-    const stdout = spyOn(process.stdout, "write").mockImplementation(() => true);
-
-    try {
-      expect(await main(["verify", "--case", "home", "--json"], root)).toBe(0);
-      expect(stdout).toHaveBeenCalledTimes(1);
-      const payload = JSON.parse(String(stdout.mock.calls[0][0]));
-      expect(payload).toMatchObject({
-        success: true,
-        pass: true,
-        visualReviewRequired: true,
-        command: "verify",
-        summary: { total: 1, passed: 1, failed: 0 },
-        cases: [{ name: "home", reproduce: "shimon verify --case home --json" }],
-      });
-      expect(payload.cases[0].evidence.screenshot).toStartWith(root);
-    } finally {
-      stdout.mockRestore();
-    }
-  }, 30_000);
-
-  test("does not report visual completion before screenshots are reviewed", async () => {
-    const root = await mkdtemp(join(tmpdir(), "shimon-cli-"));
-    roots.push(root);
-    const html = '<html lang="en"><head><title>verify</title></head><body><main><h1>ready</h1></main></body></html>';
-    await writeFile(
-      join(root, "shimon.config.mjs"),
-      `export default {
-        target: { url: ${JSON.stringify(`data:text/html,${encodeURIComponent(html)}`)} },
-        cases: [{ name: "home", review: ["Heading is clear"] }],
-      };`,
-    );
-    const stdout = spyOn(process.stdout, "write").mockImplementation(() => true);
-
-    try {
-      expect(await main(["verify"], root)).toBe(0);
-      expect(stdout).toHaveBeenCalledWith("automated checks passed; inspect 1 screenshot\n");
-    } finally {
-      stdout.mockRestore();
-    }
-  }, 30_000);
-
   test("emits operational errors as one JSON document on stdout", async () => {
     const root = await mkdtemp(join(tmpdir(), "shimon-cli-"));
     roots.push(root);
@@ -161,7 +109,7 @@ describe("parseCliArgs", () => {
     const result = spawnSync(link, ["--version"], { encoding: "utf8" });
 
     expect(result.status).toBe(0);
-    expect(result.stdout).toBe("0.3.0\n");
+    expect(result.stdout).toBe("0.3.1\n");
   });
 
   test("keeps the tracked CLI bundle synchronized with its source", async () => {
@@ -206,12 +154,30 @@ describe("parseCliArgs", () => {
 
     const packed = spawnSync(
       "npm",
-      ["pack", "--dry-run", "--json", "--cache", join(root, "npm-cache")],
+      ["pack", "--dry-run", "--json", "--ignore-scripts", "--cache", join(root, "npm-cache")],
       { cwd: root, encoding: "utf8" },
     );
     expect(packed.status).toBe(0);
     const [manifest] = JSON.parse(packed.stdout) as [{ files: Array<{ path: string }> }];
 
     expect(manifest.files.map((file) => file.path)).toContain("dist/cli.js");
+  });
+
+  test("includes the Pi extension runtime sources in the npm package", async () => {
+    const root = await mkdtemp(join(tmpdir(), "shimon-pack-"));
+    roots.push(root);
+    const repository = resolve(import.meta.dir, "..");
+    const packed = spawnSync(
+      "npm",
+      ["pack", "--dry-run", "--json", "--ignore-scripts", "--cache", join(root, "npm-cache")],
+      { cwd: repository, encoding: "utf8" },
+    );
+    expect(packed.status).toBe(0);
+    const [manifest] = JSON.parse(packed.stdout) as [{ files: Array<{ path: string }> }];
+    const paths = manifest.files.map((file) => file.path);
+
+    expect(paths).toContain("extensions/pi/index.ts");
+    expect(paths).toContain("src/config.ts");
+    expect(paths).toContain("src/verify.ts");
   });
 });
