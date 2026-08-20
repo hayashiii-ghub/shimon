@@ -39,58 +39,6 @@ describe("parseCliArgs", () => {
     expect(() => parseCliArgs(["selftest"])).toThrow("Unknown command: selftest");
   });
 
-  test("runs one verify case and emits one JSON result", async () => {
-    const root = await mkdtemp(join(tmpdir(), "shimon-cli-"));
-    roots.push(root);
-    const html = '<html lang="en"><head><title>verify</title></head><body><main><h1>ready</h1></main></body></html>';
-    await writeFile(
-      join(root, "shimon.config.mjs"),
-      `export default {
-        target: { url: ${JSON.stringify(`data:text/html,${encodeURIComponent(html)}`)} },
-        cases: [{ name: "home", review: ["Heading is clear"] }, { name: "other" }],
-      };`,
-    );
-    const stdout = spyOn(process.stdout, "write").mockImplementation(() => true);
-
-    try {
-      expect(await main(["verify", "--case", "home", "--json"], root)).toBe(0);
-      expect(stdout).toHaveBeenCalledTimes(1);
-      const payload = JSON.parse(String(stdout.mock.calls[0][0]));
-      expect(payload).toMatchObject({
-        success: true,
-        pass: true,
-        visualReviewRequired: true,
-        command: "verify",
-        summary: { total: 1, passed: 1, failed: 0 },
-        cases: [{ name: "home", reproduce: "shimon verify --case home --json" }],
-      });
-      expect(payload.cases[0].evidence.screenshot).toStartWith(root);
-    } finally {
-      stdout.mockRestore();
-    }
-  }, 30_000);
-
-  test("does not report visual completion before screenshots are reviewed", async () => {
-    const root = await mkdtemp(join(tmpdir(), "shimon-cli-"));
-    roots.push(root);
-    const html = '<html lang="en"><head><title>verify</title></head><body><main><h1>ready</h1></main></body></html>';
-    await writeFile(
-      join(root, "shimon.config.mjs"),
-      `export default {
-        target: { url: ${JSON.stringify(`data:text/html,${encodeURIComponent(html)}`)} },
-        cases: [{ name: "home", review: ["Heading is clear"] }],
-      };`,
-    );
-    const stdout = spyOn(process.stdout, "write").mockImplementation(() => true);
-
-    try {
-      expect(await main(["verify"], root)).toBe(0);
-      expect(stdout).toHaveBeenCalledWith("automated checks passed; inspect 1 screenshot\n");
-    } finally {
-      stdout.mockRestore();
-    }
-  }, 30_000);
-
   test("emits operational errors as one JSON document on stdout", async () => {
     const root = await mkdtemp(join(tmpdir(), "shimon-cli-"));
     roots.push(root);

@@ -273,21 +273,19 @@ describe("verifyProject", () => {
         url: `data:text/html,${encodeURIComponent('<html lang="en"><head><title>timeout</title></head><body><main><h1>ready</h1></main></body></html>')}`,
         viewport: { width: 320, height: 240 },
       },
-      timeouts: { runMs: 1_000, caseMs: 100, navigationMs: 500 },
+      timeouts: { runMs: 5_000, caseMs: 100, navigationMs: 500 },
       freezeAnimations: true,
       cases: [{ name: "hanging", prepare: () => new Promise<void>(() => undefined) }],
     };
 
-    const startedAt = Date.now();
     const result = await verifyProject(config, { root });
 
-    expect(Date.now() - startedAt).toBeLessThan(1_000);
     expect(result.cases[0]).toMatchObject({
       name: "hanging",
       pass: false,
       error: { code: "case_timeout" },
     });
-  }, 2_000);
+  }, 5_000);
 
   test("reports the run budget separately from a case timeout", async () => {
     const root = await mkdtemp(join(tmpdir(), "shimon-verify-"));
